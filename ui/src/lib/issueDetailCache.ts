@@ -1,6 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import type { Issue, IssueComment } from "@paperclipai/shared";
 import { issuesApi } from "@/api/issues";
+import { prefetchIssueThread } from "./issue-thread-queries";
 import { queryKeys } from "@/lib/queryKeys";
 import { getNextIssueCommentPageParam, ISSUE_COMMENT_PAGE_SIZE } from "@/lib/optimistic-issue-comments";
 
@@ -178,7 +179,7 @@ export function prefetchIssueComments(queryClient: QueryClient, issueRef: string
 
 /**
  * Prefetch everything the issue-detail first paint needs — the detail snapshot
- * and the first comments page — for instant warm navigation from a list row.
+ * and first comments page plus thread metadata — for warm navigation from a list row.
  * Seeds the full list-row snapshot when provided so the header + description
  * paint immediately with no loading state.
  */
@@ -192,5 +193,6 @@ export function prefetchIssueDetailForNavigation(
   return Promise.all([
     prefetchIssueDetail(queryClient, issueRef, options),
     prefetchIssueComments(queryClient, issueRef),
+    prefetchIssueThread(queryClient, issueRef),
   ]);
 }

@@ -247,7 +247,7 @@ describe.each(["legacy", "native"] as const)("%s task history readiness", (runti
   });
 
   it.each(["running", "succeeded"])(
-    "waits for a %s run to hydrate even when a scheduled retry is present",
+    "reveals durable comments before a %s run finishes hydrating",
     async (status) => {
       const props = {
         issueId: "issue-1",
@@ -264,10 +264,11 @@ describe.each(["legacy", "native"] as const)("%s task history readiness", (runti
         ],
       };
       render(<TaskChatThread {...props} />);
-      expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
+      expect(container.querySelector('[aria-busy="false"]')).not.toBeNull();
       expect(
         container.querySelector('[data-testid="task-chat-history-loading"]'),
-      ).not.toBeNull();
+      ).toBeNull();
+      expect(container.textContent).toContain("Thread message 1");
 
       transcriptState.hydratedRunIds = new Set(["started-run"]);
       nativeTranscriptState.hydratedRunIds = new Set(["started-run"]);
@@ -603,7 +604,35 @@ describe("TaskChatThread draft pass-through", () => {
 });
 
 describe("TaskChatThread runtime transcript selection", () => {
+  it("does not download fallback logs until native events are empty or fail", () => {
+    const props = {
+      issueId: "native-history", comments: [], onAdd: async () => {},
+      linkedRuns: [{ runId: "native-run", runtimeMode: "native" as const,
+        status: "succeeded", agentId: "agent-1", adapterType: "paperclip_runner",
+        createdAt: "2026-08-25T18:00:00.000Z", startedAt: "2026-08-25T18:00:00.000Z" }],
+    };
+    nativeTranscriptState.hydratedRunIds = new Set();
+    render(<TaskChatThread {...props} />);
+    expect(transcriptHookRuns.legacy.at(-1)).toEqual([]);
+    expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
+
+    nativeTranscriptState.hydratedRunIds = new Set(["native-run"]);
+    nativeTranscriptState.transcriptByRun.set("native-run", [{ kind: "assistant", text: "Native response", ts: "2026-08-25T18:00:01.000Z", channel: "final" }]);
+    render(<TaskChatThread {...props} />);
+    expect(transcriptHookRuns.legacy.at(-1)).toEqual([]);
+
+    nativeTranscriptState.transcriptByRun.clear();
+    render(<TaskChatThread {...props} />);
+    expect(transcriptHookRuns.legacy.at(-1)).toMatchObject([{ id: "native-run" }]);
+
+    nativeTranscriptState.hydratedRunIds = new Set();
+    nativeTranscriptState.errorsByRun.set("native-run", { message: "Unavailable" });
+    render(<TaskChatThread {...props} />);
+    expect(transcriptHookRuns.legacy.at(-1)).toMatchObject([{ id: "native-run" }]);
+  });
+
   it("selects persisted runtime facts while retaining the log parser as native fallback", () => {
+    nativeTranscriptState.hydratedRunIds = new Set(["native-run"]);
     render(
       <TaskChatThread
         comments={[]}

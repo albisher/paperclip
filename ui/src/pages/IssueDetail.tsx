@@ -112,6 +112,7 @@ import {
   resolveIssueActiveRun,
   shouldTrackIssueActiveRun,
 } from "../lib/issueActiveRun";
+import { prefetchIssueThread } from "../lib/issue-thread-queries";
 import { getIssueDetailQueryOptions } from "../lib/issueDetailCache";
 import {
   beginIssueDetailNavigation,
@@ -1181,6 +1182,7 @@ function InboxMobileToolbar({
 }
 
 type IssueDetailChatTabProps = {
+  queryIssueId?: string;
   browsers?: import("@paperclipai/shared").TaskBrowser[];
   onOpenBrowser?: (browserId: string) => void;
   onOpenSkill?: (skillId: string, name: string) => void;
@@ -1334,6 +1336,7 @@ type IssueDetailChatTabProps = {
 };
 
 const IssueDetailChatTab = memo(function IssueDetailChatTab({
+  queryIssueId,
   browsers,
   onOpenBrowser,
   onOpenSkill,
@@ -1440,6 +1443,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     ? IssueChatThread
     : TaskChatThread;
   const queryClient = useQueryClient();
+  const issueQueryRef = queryIssueId ?? issueId;
   const scrollLocation = useLocation();
   const scrollNavigationType = useNavigationType();
   const { pushToast } = useToastActions();
@@ -1449,10 +1453,10 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     isError: activityError,
     refetch: refetchActivity,
   } = useQuery({
-    queryKey: queryKeys.issues.activity(issueId),
-    queryFn: () => activityApi.forIssue(issueId),
+    queryKey: queryKeys.issues.activity(issueQueryRef),
+    queryFn: () => activityApi.forIssue(issueQueryRef),
     enabled: !!issueId,
-    placeholderData: keepPreviousDataForSameQueryTail<ActivityEvent[]>(issueId),
+    placeholderData: keepPreviousDataForSameQueryTail<ActivityEvent[]>(issueQueryRef),
   });
   const {
     data: liveRuns,
@@ -1460,12 +1464,12 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     isError: liveRunsError,
     refetch: refetchLiveRuns,
   } = useQuery({
-    queryKey: queryKeys.issues.liveRuns(issueId),
-    queryFn: () => heartbeatsApi.liveRunsForIssue(issueId),
+    queryKey: queryKeys.issues.liveRuns(issueQueryRef),
+    queryFn: () => heartbeatsApi.liveRunsForIssue(issueQueryRef),
     enabled: !!issueId,
     refetchInterval: 1000,
     placeholderData:
-      keepPreviousDataForSameQueryTail<LiveRunForIssue[]>(issueId),
+      keepPreviousDataForSameQueryTail<LiveRunForIssue[]>(issueQueryRef),
   });
   const resolvedLiveRuns = liveRuns ?? [];
   const liveRunCount = resolvedLiveRuns.length;
@@ -1477,12 +1481,12 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     isError: activeRunError,
     refetch: refetchActiveRun,
   } = useQuery({
-    queryKey: queryKeys.issues.activeRun(issueId),
-    queryFn: () => heartbeatsApi.activeRunForIssue(issueId),
+    queryKey: queryKeys.issues.activeRun(issueQueryRef),
+    queryFn: () => heartbeatsApi.activeRunForIssue(issueQueryRef),
     enabled: activeRunQueryEnabled,
     refetchInterval: liveRunCount > 0 ? false : 1000,
     placeholderData: keepPreviousDataForSameQueryTail<ActiveRunForIssue | null>(
-      issueId,
+      issueQueryRef,
     ),
   });
   const resolvedActiveRun = useMemo(
@@ -1547,12 +1551,12 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     isError: linkedRunsError,
     refetch: refetchLinkedRuns,
   } = useQuery({
-    queryKey: queryKeys.issues.runs(issueId),
-    queryFn: () => activityApi.runsForIssue(issueId),
+    queryKey: queryKeys.issues.runs(issueQueryRef),
+    queryFn: () => activityApi.runsForIssue(issueQueryRef),
     enabled: !!issueId,
     refetchInterval:
       hasLiveRuns || issueStatus === "in_progress" ? 1000 : false,
-    placeholderData: keepPreviousDataForSameQueryTail<RunForIssue[]>(issueId),
+    placeholderData: keepPreviousDataForSameQueryTail<RunForIssue[]>(issueQueryRef),
   });
   const resolvedActivity = activity ?? [];
   const resolvedLinkedRuns = linkedRuns ?? [];
@@ -1577,13 +1581,13 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     },
     onSettled: () => {
       queryClient.invalidateQueries({
-        queryKey: queryKeys.issues.runs(issueId),
+        queryKey: queryKeys.issues.runs(issueQueryRef),
       });
       queryClient.invalidateQueries({
-        queryKey: queryKeys.issues.liveRuns(issueId),
+        queryKey: queryKeys.issues.liveRuns(issueQueryRef),
       });
       queryClient.invalidateQueries({
-        queryKey: queryKeys.issues.activeRun(issueId),
+        queryKey: queryKeys.issues.activeRun(issueQueryRef),
       });
     },
     onError: (error) => {
@@ -2171,7 +2175,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
             queryKey: queryKeys.issues.comments(issueId),
           }),
           queryClient.invalidateQueries({
-            queryKey: queryKeys.issues.activity(issueId),
+            queryKey: queryKeys.issues.activity(issueQueryRef),
           }),
         ]);
         storeQueuedCommentQueue(nextQueue);
@@ -2193,6 +2197,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
       effectiveQueuedCommentQueue?.queueId,
       effectiveQueuedCommentQueue?.targetRunId,
       issueId,
+      issueQueryRef,
       queryClient,
       refreshQueueAfterConflict,
       storeQueuedCommentQueue,
@@ -3004,6 +3009,9 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     }),
     enabled: !!issueId,
   });
+  useEffect(() => {
+    if (issueId) void prefetchIssueThread(queryClient, issueId);
+  }, [issueId, queryClient]);
   const issue = queriedIssue ?? conversation?.issue ?? draftIssue;
   const resolveWritableIssueId = async () => {
     if (!conversation) return issueId!;
@@ -3096,12 +3104,12 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
   }, [issue?.id]);
 
   useEffect(() => {
-    if (!issue || commentsLoading) return;
+    if (!classicTaskInterfaceEnabled || !issue || commentsLoading) return;
     scheduleIssueDetailPaintMeasure(
       ISSUE_DETAIL_CONTENT_PAINT_MARK,
       ISSUE_DETAIL_CONTENT_MEASURE,
     );
-  }, [commentsLoading, issue?.id]);
+  }, [classicTaskInterfaceEnabled, commentsLoading, issue?.id]);
   const linkedCommentId = location.hash.startsWith("#comment-")
     ? location.hash.slice("#comment-".length)
     : null;
@@ -7785,6 +7793,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                   onRetry: (actionId) => retryDispositionRecovery.mutateAsync(actionId).then(() => undefined),
                 }}>
                 <IssueDetailChatTab
+                  queryIssueId={issueId ?? issue.id}
                   onOpenSkill={handleOpenSkill}
                   browsers={browserQuery.data}
                   onOpenBrowser={(id) => { setOpenBrowserId(id); if (isMobile) setMobilePropsOpen(true); else openTaskSidePanel(); }}

@@ -1574,6 +1574,11 @@ describe("IssueDetail", () => {
       );
     });
 
+    // The task response may need slow workspace/recovery enrichment. The
+    // thread requests must already be in flight while its skeleton is showing.
+    expect(mockActivityApi.forIssue).toHaveBeenCalledWith("PAP-1");
+    expect(mockActivityApi.runsForIssue).toHaveBeenCalledWith("PAP-1");
+
     issueRequest.resolve(createIssue());
     await flushReact();
     await flushReact();
