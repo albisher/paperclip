@@ -4,6 +4,7 @@ import {
   mkdir,
   lstat,
   mkdtemp,
+  open,
   readFile,
   readdir,
   readlink,
@@ -6391,7 +6392,7 @@ it.each([
   },
 );
 
-it.each([0, 3 * 1024 * 1024])(
+it.each([0, 65 * 1024 * 1024])(
   "probes an exact-authority resume with %i extra journal bytes and confirms its live provider identity",
   async (extraJournalBytes) => {
     const stateDirectory = await mkdtemp(
@@ -6444,10 +6445,20 @@ it.each([0, 3 * 1024 * 1024])(
       "control-plane-state.json",
     );
     if (extraJournalBytes > 0) {
-      const journal = await readFile(statePath, "utf8");
-      const paddedJournal = `${journal}${" ".repeat(extraJournalBytes)}`;
-      await writeFile(statePath, paddedJournal);
-      expect(Buffer.byteLength(paddedJournal)).toBeGreaterThan(2 * 1024 * 1024);
+      const padding = Buffer.alloc(1024 * 1024, 0x20);
+      const stateHandle = await open(statePath, "a");
+      try {
+        for (let remaining = extraJournalBytes; remaining > 0;) {
+          const bytesToWrite = Math.min(remaining, padding.length);
+          await stateHandle.write(padding, 0, bytesToWrite);
+          remaining -= bytesToWrite;
+        }
+      } finally {
+        await stateHandle.close();
+      }
+      expect((await stat(statePath)).size).toBeGreaterThan(
+        64 * 1024 * 1024,
+      );
     }
     const beforeResume = JSON.parse(await readFile(statePath, "utf8")) as {
       commands: Array<{ type: string }>;
