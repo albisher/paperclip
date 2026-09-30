@@ -17,6 +17,7 @@ import { accessService } from "../services/access.js";
 import type { heartbeatService } from "../services/heartbeat.js";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
 import { resolveGitHubOperationCredentials } from "../services/github-operation-credentials.js";
+import { recordPushAttribution } from "../services/push-attribution.js";
 
 function bearer(req: Request) {
   const value = req.header("authorization") ?? "";
@@ -54,6 +55,21 @@ export function runtimeConnectionIntentRoutes(db: Db) {
     res.setHeader("Cache-Control", "no-store");
     res.json(await resolveGitHubOperationCredentials(db, {
       companyId: claims.company_id, agentId: claims.sub, runId: claims.run_id,
+    }));
+  });
+
+  // The managed launcher reports each successful push here. Without it the audit
+  // stream has the run and agent but never the commit that was published.
+  router.post("/runtime-tools/github/push-report", async (req, res) => {
+    if (req.headers.origin || req.headers.cookie || req.headers["sec-fetch-site"]) throw forbidden("Push attribution requires runtime authentication");
+    const claims = verifyRuntimeToolsToken(typeof req.headers["x-paperclip-github-capability"] === "string"
+      ? req.headers["x-paperclip-github-capability"] : bearer(req), "github_credentials");
+    if (!claims) throw unauthorized("Invalid GitHub runtime capability");
+    res.setHeader("Cache-Control", "no-store");
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    res.status(201).json(await recordPushAttribution(db, {
+      companyId: claims.company_id, agentId: claims.sub, runId: claims.run_id,
+      sha: body.sha, repo: body.repo, branch: body.branch, remote: body.remote, deleted: body.deleted,
     }));
   });
 
