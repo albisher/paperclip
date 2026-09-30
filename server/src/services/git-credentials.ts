@@ -50,7 +50,20 @@ export type GitCredential = {
   source: "managed_connection" | "company_secret" | "server_env";
   /** The company-secret name the token came from; null for a server-environment token. */
   secretName: string | null;
+  /**
+   * What the connection's stored tenant record *claims* this credential is. Kept for reporting
+   * and diagnostics — it is what the operator sees when a connection looks wrong — and it is
+   * deliberately not what a commit is attributed to. A record can be stale, hand-edited, or a
+   * seeded stand-in such as `100000001`, which is a live unrelated account.
+   */
   githubIdentity?: { userId: string; login: string };
+  /**
+   * What GitHub confirmed, by asking `/user` with the token that is about to be used. This is
+   * the only identity allowed to produce a commit ident, because it is the only one GitHub
+   * agrees with. Absent whenever the token could not be verified, and an absent value means
+   * "publish no ident", never "fall back to the claim".
+   */
+  verifiedGithubIdentity?: { userId: string; login: string };
   identitySource?: "personal" | "dedicated";
   connectionId?: string;
   grantId?: string;
@@ -123,6 +136,16 @@ export type VerifiedGitHubIdentity = { userId: string; login: string; verifiedAt
  * per token per window while bounding how long an unverified tenant record could ride along.
  */
 const GITHUB_IDENTITY_CACHE_TTL_MS = 10 * 60_000;
+/**
+ * How long `/user` may take before the identity is treated as unverified.
+ *
+ * Managed credential acquisition awaits this request before git runs, so a hung socket would
+ * hold a clone, fetch, or agent operation open indefinitely — the request has no other bound,
+ * because `fetch` resolves only when the peer does. This matches the timeout the existing
+ * GitHub account-metadata request already uses, and `AbortSignal.timeout` also covers a peer
+ * that accepts the connection and then stalls, which a connect-only timeout would miss.
+ */
+const GITHUB_IDENTITY_REQUEST_TIMEOUT_MS = 15_000;
 const githubIdentityCache = new Map<string, VerifiedGitHubIdentity>();
 
 export function resetGitHubIdentityCache(): void {
@@ -158,6 +181,7 @@ export async function resolveVerifiedGitHubIdentity(
         "x-github-api-version": "2022-11-28",
         "user-agent": "paperclip-git-credential",
       },
+      signal: AbortSignal.timeout(GITHUB_IDENTITY_REQUEST_TIMEOUT_MS),
     });
     if (!response.ok) return null;
     payload = await response.json() as { id?: unknown; login?: unknown };
@@ -227,7 +251,7 @@ export function reconcileGitHubIdentity(input: {
  * value that is not a syntactically valid GitHub login (spaces, `@`, newlines, an invented
  * placeholder) is rejected instead of being written into git config.
  */
-export function verifiedNoreplyEmail(identity: GitCredential["githubIdentity"]): string | null {
+export function verifiedNoreplyEmail(identity: GitCredential["verifiedGithubIdentity"]): string | null {
   if (!identity) return null;
   const userId = identity.userId?.trim();
   const login = identity.login?.trim();
@@ -242,7 +266,9 @@ export function verifiedNoreplyEmail(identity: GitCredential["githubIdentity"]):
 }
 
 export function buildGitAuthInvocation(credential: GitCredential): GitAuthInvocation {
-  const identity = credential.githubIdentity;
+  // Only a verified identity may reach git config. Reading the stored claim here is the defect
+  // this replaced: the claim is what the connection says it is, not what the token is.
+  const identity = credential.verifiedGithubIdentity;
   const noreplyEmail = verifiedNoreplyEmail(identity);
   const configEntries = [
     ["credential.helper", ""],
@@ -680,21 +706,31 @@ export async function resolveManagedGitHubCredential(
     // commit ident is published only from what GitHub says the token *is*. A record that
     // contradicts the token — a stale rename, a hand-edited row, a seeded placeholder such as
     // the stand-in `100000001` — would otherwise put every agent commit in an unrelated
-    // account's name, so a mismatch fails the whole acquisition instead of degrading silently.
+    // account's name, so the claim is dropped rather than published.
+    //
+    // Verification gates the *ident*, not the credential. Whether a resolved token should
+    // report `available` is a separate contract owned by the operation-credentials layer, and
+    // conflating the two made every managed grant unusable whenever `/user` could not be
+    // reached: no network, a rate limit, or a test double all produced a hard failure instead
+    // of a commit with no forged identity. An unverifiable token now yields a credential with
+    // no `verifiedGithubIdentity`, and `buildGitAuthInvocation` publishes no ident for that
+    // case, so git falls back to the ambient host identity. What can never happen is a commit
+    // carrying an address GitHub does not resolve to the account that authored it.
     const reconciliation = reconcileGitHubIdentity({
       claimed: { userId: github.userId, login: github.login },
       verified: await resolveVerifiedGitHubIdentity(token),
     });
-    if (!reconciliation.identity) {
-      return { configured: true, identitySource: selection.identitySource, error: reconciliation.error };
-    }
     return {
       configured: true, identitySource: selection.identitySource,
       credential: {
         token,
         source: "managed_connection" as const,
         secretName: null,
-        githubIdentity: reconciliation.identity,
+        // The stored claim is still reported, so an operator comparing it against what GitHub
+        // says is the account that connection actually authenticated as.
+        githubIdentity: { userId: github.userId, login: github.login },
+        // ...but only the verified answer is allowed to become a commit ident.
+        ...(reconciliation.identity ? { verifiedGithubIdentity: reconciliation.identity } : {}),
         identitySource: grant.kind === "agent" ? "dedicated" as const : "personal" as const,
         connectionId: grant.connectionId,
         grantId: grant.id,

@@ -37,6 +37,7 @@ import {
 import { resolveGitHubOperationCredentials } from "../services/github-operation-credentials.js";
 import {
   filterResolvedGitHubConnectionsForRun,
+  resetGitHubIdentityCache,
   resolveManagedGitHubIdentitySelection,
 } from "../services/git-credentials.js";
 
@@ -223,15 +224,83 @@ const support = await getEmbeddedPostgresTestSupport();
           source: "personal",
         });
         expect(result.env.GH_TOKEN).toBe(`test-token-${user}`);
-        expect(result.env.GIT_AUTHOR_EMAIL).toBe(
-          `${user}+${user}@users.noreply.github.com`,
-        );
+        // `test-token-${user}` is a fixture, not a credential, so `/user` cannot confirm it and
+        // no ident is published. The claim is still reported above as `login`, which is what an
+        // operator needs; what it is never allowed to do is decide whose name a commit carries.
+        expect(result.env.GIT_AUTHOR_EMAIL).toBeUndefined();
       }
       const history = await db
         .select()
         .from(runIdentityContexts)
         .where(eq(runIdentityContexts.runId, input.runId));
       expect(JSON.stringify(history)).not.toContain("test-token-");
+    });
+    it("never publishes an ident that GitHub contradicts, and still publishes one it confirms", async () => {
+      const input = await seed();
+      const granted = await grant(input, "A");
+      async function claimAs(userId: string, login: string) {
+        // The stand-in tenant that shipped with the managed connection: `100000001` is a live,
+        // unrelated GitHub account, so publishing it credits every agent commit to a stranger.
+        await db
+          .update(connectionGrants)
+          .set({
+            providerTenant: {
+              github: {
+                userId,
+                login,
+                installationCount: 1,
+                repositoryCount: 1,
+                repositorySelection: "selected",
+                installationIds: ["1"],
+                installationOwnerLogins: [login],
+              },
+            },
+          })
+          .where(eq(connectionGrants.id, granted.id));
+      }
+      async function resolveAs(verified: { id: number; login: string }) {
+        resetGitHubIdentityCache();
+        const fetchImpl = vi.fn(async () => ({
+          ok: true,
+          json: async () => verified,
+        }));
+        vi.stubGlobal("fetch", fetchImpl);
+        try {
+          return await resolveGitHubOperationCredentials(db, input);
+        } finally {
+          vi.unstubAllGlobals();
+          resetGitHubIdentityCache();
+        }
+      }
+
+      // A claim GitHub contradicts produces no ident at all. Before this, the claim was
+      // published verbatim, so every commit on this connection was a verified-looking
+      // contribution to `Tessalol`.
+      await claimAs("100000001", "Tessalol");
+      const contradicted = await resolveAs({ id: 5732579, login: "albisher" });
+      expect(contradicted).toMatchObject({
+        status: "available",
+        // The claim is still reported so a wrong connection record stays visible to an operator.
+        login: "Tessalol",
+      });
+      expect(contradicted.env.GIT_AUTHOR_EMAIL).toBeUndefined();
+      expect(contradicted.env.GIT_COMMITTER_EMAIL).toBeUndefined();
+      expect(JSON.stringify(contradicted.env)).not.toContain("100000001");
+
+      // A claim GitHub agrees with is published from GitHub's own answer, so the healthy path
+      // still yields a real ident rather than silently degrading to the ambient host identity.
+      await claimAs("5732579", "albisher");
+      const confirmed = await resolveAs({ id: 5732579, login: "albisher" });
+      expect(confirmed).toMatchObject({
+        status: "available",
+        login: "albisher",
+      });
+      expect(confirmed.env.GIT_AUTHOR_EMAIL).toBe(
+        "5732579+albisher@users.noreply.github.com",
+      );
+      expect(confirmed.env.GIT_COMMITTER_EMAIL).toBe(
+        "5732579+albisher@users.noreply.github.com",
+      );
     });
     it("returns no credential for unconnected users, removed membership, or ambiguous personal accounts", async () => {
       const input = await seed();

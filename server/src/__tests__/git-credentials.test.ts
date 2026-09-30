@@ -214,7 +214,7 @@ describe("buildGitAuthInvocation", () => {
       token: "super-secret-token",
       source: "managed_connection",
       secretName: null,
-      githubIdentity: { userId: "12345", login: "octocat" },
+      verifiedGithubIdentity: { userId: "12345", login: "octocat" },
     });
     expect(invocation.env.GIT_CONFIG_KEY_7).toBe("user.name");
     expect(invocation.env.GIT_CONFIG_VALUE_7).toBe("octocat");
@@ -227,6 +227,25 @@ describe("buildGitAuthInvocation", () => {
     expect(Object.values(invocation.env).filter((value) => value.includes("super-secret-token"))).toHaveLength(3);
   });
 
+  it("publishes no ident from the stored claim alone, only from a verified identity", () => {
+    // The defect this replaces: `githubIdentity` was populated straight from the connection's
+    // tenant record and read as the commit ident. The shipped stand-in row carried `100000001`,
+    // a live but unrelated account, so every managed commit became a verified-looking
+    // contribution to that stranger. The claim is still reported to operators; it just no
+    // longer decides whose name a commit carries.
+    const invocation = buildGitAuthInvocation({
+      token: "super-secret-token",
+      source: "managed_connection",
+      secretName: null,
+      githubIdentity: { userId: "100000001", login: "Tessalol" },
+    });
+    expect(invocation.env.GIT_AUTHOR_EMAIL).toBeUndefined();
+    expect(invocation.env.GIT_COMMITTER_EMAIL).toBeUndefined();
+    expect(invocation.env.GIT_AUTHOR_NAME).toBeUndefined();
+    expect(Object.values(invocation.env)).not.toContain("user.email");
+    expect(JSON.stringify(invocation.env)).not.toContain("100000001");
+  });
+
   it("withholds the commit identity entirely when the id is not a numeric account id", () => {
     // The regression this guards: a stand-in tenant row carried `100000001`, a real but
     // unrelated account, and the broker published it as the agent's own ident. A non-numeric or
@@ -236,7 +255,7 @@ describe("buildGitAuthInvocation", () => {
         token: "super-secret-token",
         source: "managed_connection",
         secretName: null,
-        githubIdentity: { userId, login: "octocat" },
+        verifiedGithubIdentity: { userId, login: "octocat" },
       });
       expect(invocation.env.GIT_AUTHOR_EMAIL).toBeUndefined();
       expect(invocation.env.GIT_COMMITTER_EMAIL).toBeUndefined();
@@ -253,7 +272,7 @@ describe("buildGitAuthInvocation", () => {
         token: "super-secret-token",
         source: "managed_connection",
         secretName: null,
-        githubIdentity: { userId: "12345", login },
+        verifiedGithubIdentity: { userId: "12345", login },
       });
       expect(invocation.env.GIT_AUTHOR_EMAIL).toBeUndefined();
       expect(invocation.env.GIT_AUTHOR_NAME).toBeUndefined();
@@ -266,7 +285,7 @@ describe("buildGitAuthInvocation", () => {
       token: "super-secret-token",
       source: "managed_connection",
       secretName: null,
-      githubIdentity: { userId: "5732579", login: "al-bisher" },
+      verifiedGithubIdentity: { userId: "5732579", login: "al-bisher" },
     });
     expect(invocation.env.GIT_AUTHOR_EMAIL).toBe("5732579+al-bisher@users.noreply.github.com");
     expect(invocation.env.GIT_COMMITTER_EMAIL).toBe("5732579+al-bisher@users.noreply.github.com");
