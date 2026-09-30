@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +13,7 @@ import {
   isGitHubHttpsRemoteUrl,
   reconcileGitHubIdentity,
   resetGitHubIdentityCache,
+  resolveGitHubIdentity,
   resolveVerifiedGitHubIdentity,
   scrubGitCredentialText,
   verifiedNoreplyEmail,
@@ -189,6 +190,17 @@ describe("createGitRemoteAuthProvider", () => {
   });
 });
 
+function publishedConfig(invocation: { env: Record<string, string | undefined> }): Record<string, string> {
+  const entries: Record<string, string> = {};
+  const count = Number(invocation.env.GIT_CONFIG_COUNT ?? 0);
+  for (let index = 0; index < count; index += 1) {
+    const key = invocation.env[`GIT_CONFIG_KEY_${index}`];
+    const value = invocation.env[`GIT_CONFIG_VALUE_${index}`];
+    if (key !== undefined && value !== undefined) entries[key] = value;
+  }
+  return entries;
+}
+
 describe("buildGitAuthInvocation", () => {
   it("keeps the token out of argv and installs the helper URL-scoped to github.com", () => {
     const invocation = buildGitAuthInvocation({
@@ -239,10 +251,10 @@ describe("buildGitAuthInvocation", () => {
       secretName: null,
       githubIdentity: { userId: "100000001", login: "Tessalol" },
     });
-    expect(invocation.env.GIT_AUTHOR_EMAIL).toBeUndefined();
-    expect(invocation.env.GIT_COMMITTER_EMAIL).toBeUndefined();
-    expect(invocation.env.GIT_AUTHOR_NAME).toBeUndefined();
-    expect(Object.values(invocation.env)).not.toContain("user.email");
+    expect(invocation.env.GIT_AUTHOR_EMAIL).toBe("");
+    expect(invocation.env.GIT_COMMITTER_EMAIL).toBe("");
+    expect(invocation.env.GIT_AUTHOR_NAME).toBe("");
+    expect(publishedConfig(invocation)["user.email"]).toBe("");
     expect(JSON.stringify(invocation.env)).not.toContain("100000001");
   });
 
@@ -257,10 +269,10 @@ describe("buildGitAuthInvocation", () => {
         secretName: null,
         verifiedGithubIdentity: { userId, login: "octocat" },
       });
-      expect(invocation.env.GIT_AUTHOR_EMAIL).toBeUndefined();
-      expect(invocation.env.GIT_COMMITTER_EMAIL).toBeUndefined();
-      expect(invocation.env.GIT_AUTHOR_NAME).toBeUndefined();
-      expect(Object.values(invocation.env)).not.toContain("user.email");
+      expect(invocation.env.GIT_AUTHOR_EMAIL).toBe("");
+      expect(invocation.env.GIT_COMMITTER_EMAIL).toBe("");
+      expect(invocation.env.GIT_AUTHOR_NAME).toBe("");
+      expect(publishedConfig(invocation)["user.email"]).toBe("");
     }
   });
 
@@ -274,9 +286,9 @@ describe("buildGitAuthInvocation", () => {
         secretName: null,
         verifiedGithubIdentity: { userId: "12345", login },
       });
-      expect(invocation.env.GIT_AUTHOR_EMAIL).toBeUndefined();
-      expect(invocation.env.GIT_AUTHOR_NAME).toBeUndefined();
-      expect(Object.values(invocation.env)).not.toContain("user.name");
+      expect(invocation.env.GIT_AUTHOR_EMAIL).toBe("");
+      expect(invocation.env.GIT_AUTHOR_NAME).toBe("");
+      expect(publishedConfig(invocation)["user.name"]).toBe("");
     }
   });
 
@@ -289,6 +301,75 @@ describe("buildGitAuthInvocation", () => {
     });
     expect(invocation.env.GIT_AUTHOR_EMAIL).toBe("5732579+al-bisher@users.noreply.github.com");
     expect(invocation.env.GIT_COMMITTER_EMAIL).toBe("5732579+al-bisher@users.noreply.github.com");
+  });
+
+  it("publishes an empty ident, not an absent one, when a managed identity is unverified", () => {
+    // Omitting these keys is what left the hole: git reads the author from the environment
+    // before any configuration, so an invocation that published nothing simply let the host's
+    // value stand and committed under it. Empty overrides the inherited value, and the empty
+    // `user.*` pair covers the managed launcher, whose shell profile unsets the empty quartet
+    // again before git runs. Either way the commit stops with nothing written.
+    const invocation = buildGitAuthInvocation({
+      token: "super-secret-token",
+      source: "managed_connection",
+      secretName: null,
+      githubIdentity: { userId: "100000001", login: "Tessalol" },
+    });
+    expect(invocation.env.GIT_AUTHOR_NAME).toBe("");
+    expect(invocation.env.GIT_AUTHOR_EMAIL).toBe("");
+    expect(invocation.env.GIT_COMMITTER_NAME).toBe("");
+    expect(invocation.env.GIT_COMMITTER_EMAIL).toBe("");
+    expect(publishedConfig(invocation)["user.name"]).toBe("");
+    expect(publishedConfig(invocation)["user.email"]).toBe("");
+    // Empty is not a disguised ident: nothing anywhere in the environment carries the claim.
+    expect(JSON.stringify(invocation.env)).not.toContain("100000001");
+  });
+
+  it("blocks the commit when the launcher's shell profile has already unset the quartet", () => {
+    // The managed launcher writes a profile that unsets empty `GIT_AUTHOR_*` before the shell
+    // hands off to git, which would strip the environment half of the guard above. With the
+    // `user.*` pair published empty, the commit still has no ident to find and is refused
+    // instead of falling back to whatever the host would auto-detect.
+    const invocation = buildGitAuthInvocation({
+      token: "super-secret-token",
+      source: "managed_connection",
+      secretName: null,
+    });
+    const unsets = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"]
+      .filter((key) => !invocation.env[key])
+      .map((key) => key);
+    // Every value the launcher would strip has to be one it strips, i.e. already empty.
+    expect(unsets).toHaveLength(4);
+    expect(publishedConfig(invocation)["user.email"]).toBe("");
+  });
+
+  it("publishes a real ident instead of the empty quartet once verification succeeds", () => {
+    const invocation = buildGitAuthInvocation({
+      token: "super-secret-token",
+      source: "managed_connection",
+      secretName: null,
+      verifiedGithubIdentity: { userId: "5732579", login: "albisher" },
+    });
+    expect(invocation.env.GIT_AUTHOR_EMAIL).toBe("5732579+albisher@users.noreply.github.com");
+    expect(invocation.env.GIT_AUTHOR_NAME).toBe("albisher");
+    expect(publishedConfig(invocation)["user.email"]).toBe("5732579+albisher@users.noreply.github.com");
+  });
+
+  it("leaves the ambient ident alone for credentials that were never a managed connection", () => {
+    // A company secret or a server-environment token has no tenant claim to reconcile, so
+    // blanking the quartet would break a legitimate ambient-ident commit that this fix never
+    // targeted.
+    for (const source of ["company_secret", "server_env"] as const) {
+      const invocation = buildGitAuthInvocation({
+        token: "super-secret-token",
+        source,
+        secretName: source === "company_secret" ? "deploy-key" : null,
+      });
+      expect(invocation.env.GIT_AUTHOR_NAME, source).toBeUndefined();
+      expect(invocation.env.GIT_AUTHOR_EMAIL, source).toBeUndefined();
+      expect(invocation.env.GIT_COMMITTER_EMAIL, source).toBeUndefined();
+      expect(publishedConfig(invocation)["user.email"], source).toBeUndefined();
+    }
   });
 });
 
@@ -303,7 +384,10 @@ describe("verifiedNoreplyEmail", () => {
 
 describe("resolveVerifiedGitHubIdentity", () => {
   function jsonResponse(body: unknown, ok = true) {
-    return { ok, json: async () => body } as unknown as Response;
+    return { ok, status: ok ? 200 : 401, json: async () => body } as unknown as Response;
+  }
+  function statusResponse(status: number) {
+    return { ok: false, status, json: async () => ({ message: "nope" }) } as unknown as Response;
   }
 
   it("returns the id and login GitHub reports for the token", async () => {
@@ -343,7 +427,7 @@ describe("resolveVerifiedGitHubIdentity", () => {
   it("returns null instead of guessing when GitHub cannot answer", async () => {
     resetGitHubIdentityCache();
     for (const [label, fetchImpl] of [
-      ["401", async () => jsonResponse({ message: "Bad credentials" }, false)],
+      ["401", async () => statusResponse(401)],
       ["network error", async () => { throw new Error("ECONNREFUSED"); }],
       ["non-integer id", async () => jsonResponse({ id: "not-a-number", login: "albisher" })],
       ["zero id", async () => jsonResponse({ id: 0, login: "albisher" })],
@@ -359,64 +443,268 @@ describe("resolveVerifiedGitHubIdentity", () => {
     }
     resetGitHubIdentityCache();
   });
+
+  it("separates a rejected credential from an unanswered question", async () => {
+    // The distinction the whole refusal contract rests on. A 401/403 is GitHub stating that
+    // the token is not an account, which no retry will change; a 5xx or a rate limit is the
+    // absence of an answer, which says nothing about the token at all.
+    resetGitHubIdentityCache();
+    const expectations: [string, number, "rejected" | "unreachable"][] = [
+      ["401", 401, "rejected"],
+      ["403", 403, "rejected"],
+      ["429", 429, "unreachable"],
+      ["500", 500, "unreachable"],
+      ["502", 502, "unreachable"],
+    ];
+    for (const [label, status, expected] of expectations) {
+      const fetchImpl = vi.fn(async () => statusResponse(status));
+      const resolution = await resolveGitHubIdentity(`tri-${label}`, {
+        now: 1_000,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      expect(resolution.status, label).toBe(expected);
+    }
+    const thrown = await resolveGitHubIdentity("tri-offline", {
+      now: 1_000,
+      fetchImpl: (async () => { throw new Error("ECONNREFUSED"); }) as unknown as typeof fetch,
+    });
+    expect(thrown.status).toBe("unreachable");
+    resetGitHubIdentityCache();
+  });
+
+  it("reports a verified answer in the same shape it caches", async () => {
+    resetGitHubIdentityCache();
+    const fetchImpl = vi.fn(async () => jsonResponse({ id: 5732579, login: "albisher" }));
+    const cast = fetchImpl as unknown as typeof fetch;
+    const first = await resolveGitHubIdentity("shape-tok", { now: 1_000, fetchImpl: cast });
+    expect(first.status).toBe("verified");
+    expect(first.status === "verified" && first.identity).toMatchObject({ userId: "5732579", login: "albisher" });
+    // The second call is served from the cache, so a status flip would prove the cache was
+    // bypassed rather than the answer being refetched.
+    const second = await resolveGitHubIdentity("shape-tok", { now: 2_000, fetchImpl: cast });
+    expect(second.status).toBe("verified");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    resetGitHubIdentityCache();
+  });
 });
 
 describe("reconcileGitHubIdentity", () => {
+  const verifiedResolution = { status: "verified", identity: { userId: "5732579", login: "albisher", verifiedAt: 0 } } as const;
+
   it("publishes the token's own identity when the tenant record agrees", () => {
     expect(reconcileGitHubIdentity({
       claimed: { userId: "5732579", login: "albisher" },
-      verified: { userId: "5732579", login: "albisher", verifiedAt: 0 },
-    })).toEqual({ identity: { userId: "5732579", login: "albisher" } });
+      resolution: verifiedResolution,
+    })).toEqual({ outcome: "verified", identity: { userId: "5732579", login: "albisher" } });
   });
 
-  it("reports an unreachable GitHub as unverified, not as a contradiction", () => {
+  it("withholds the ident when GitHub rejected the token outright", () => {
+    // GitHub answered, and the answer was that these credentials are not an account. The
+    // credential cannot be refused here without also failing every read for a token that is
+    // merely misconfigured, but it must not carry an ident either — and it must say why, so
+    // the operator knows to issue a new token rather than to retry.
     const result = reconcileGitHubIdentity({
       claimed: { userId: "100000001", login: "etqan-bot" },
-      verified: null,
+      resolution: { status: "rejected", reason: "GitHub rejected the credential (HTTP 401)" },
     });
-    expect(result.identity).toBeUndefined();
-    expect(result.error).toMatch(/could not be verified/i);
-    // The distinction the caller branches on. No network is not evidence of a mismatch.
-    expect(result.failure).toBe("unverified");
+    expect(result.outcome).toBe("unverified");
+    expect(result.outcome === "unverified" && result.error).toMatch(/rejected the credential/i);
+  });
+
+  it("withholds only the ident when GitHub could not be asked at all", () => {
+    // A network fault says nothing about the token, so reads keep working. The caller pairs
+    // this with an ident that is published empty rather than omitted, which stops git
+    // substituting the ambient one.
+    const result = reconcileGitHubIdentity({
+      claimed: { userId: "100000001", login: "etqan-bot" },
+      resolution: { status: "unreachable", reason: "GitHub could not be reached to verify the credential" },
+    });
+    expect(result.outcome).toBe("unverified");
+    expect(result.outcome === "unverified" && result.error).toMatch(/could not be verified/i);
   });
 
   it("refuses a tenant record whose id belongs to a different account", () => {
     // The exact shape of the standing defect: the record says 100000001, the token is somebody
-    // else. Publishing the record would put the commit in the stranger's name.
+    // else. Publishing the record would put the commit in the stranger's name, and dropping it
+    // while still releasing the token would put it in the host's name instead.
     const result = reconcileGitHubIdentity({
       claimed: { userId: "100000001", login: "etqan-bot" },
-      verified: { userId: "5732579", login: "albisher", verifiedAt: 0 },
+      resolution: verifiedResolution,
     });
-    expect(result.identity).toBeUndefined();
-    expect(result.error).toContain("100000001");
-    expect(result.error).toContain("5732579");
-    // GitHub answered here, so this is a positive claim about a working token — not a hiccup.
-    expect(result.failure).toBe("contradicted");
+    expect(result.outcome).toBe("contradicted");
+    expect(result.outcome === "contradicted" && result.error).toContain("100000001");
+    expect(result.outcome === "contradicted" && result.error).toContain("5732579");
   });
 
   it("refuses a tenant record whose login was renamed on GitHub", () => {
     const result = reconcileGitHubIdentity({
       claimed: { userId: "5732579", login: "old-login" },
-      verified: { userId: "5732579", login: "new-login", verifiedAt: 0 },
+      resolution: { status: "verified", identity: { userId: "5732579", login: "new-login", verifiedAt: 0 } },
     });
-    expect(result.identity).toBeUndefined();
-    expect(result.error).toContain("old-login");
-    expect(result.failure).toBe("contradicted");
+    expect(result.outcome).toBe("contradicted");
+    expect(result.outcome === "contradicted" && result.error).toContain("old-login");
   });
 
   it("accepts a record with no id or login, since the verified identity is authoritative", () => {
-    expect(reconcileGitHubIdentity({
-      claimed: null,
-      verified: { userId: "5732579", login: "albisher", verifiedAt: 0 },
-    })).toEqual({ identity: { userId: "5732579", login: "albisher" } });
+    expect(reconcileGitHubIdentity({ claimed: null, resolution: verifiedResolution })).toEqual({
+      outcome: "verified",
+      identity: { userId: "5732579", login: "albisher" },
+    });
   });
 
   it("never puts token material in the error it returns", () => {
     const result = reconcileGitHubIdentity({
       claimed: { userId: "100000001", login: "etqan-bot" },
-      verified: { userId: "5732579", login: "albisher", verifiedAt: 0 },
+      resolution: verifiedResolution,
     });
-    expect(result.error).not.toMatch(/gho_|ghp_|github_pat_/);
+    expect(result.outcome === "contradicted" && result.error).not.toMatch(/gho_|ghp_|github_pat_/);
+  });
+});
+
+describe("a managed commit with no verified identity (real git, no network)", () => {
+  /**
+   * Commit a file in a throwaway repository with the invocation's own environment, then report
+   * whether git wrote a commit and whose identity it recorded.
+   *
+   * This is the proof that matters for the defect: unit assertions on the environment say which
+   * keys were published, but only git says whether a commit still happens and what it is
+   * attributed to. The ambient identity here is deliberately present and different, because that
+   * is the case that misattributes silently.
+   */
+  async function commitWith(
+    credential: Parameters<typeof buildGitAuthInvocation>[0],
+    ambient: { name: string; email: string },
+    options: { launcherProfileRan?: boolean } = {},
+  ) {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-git-ident-"));
+    try {
+      const invocation = buildGitAuthInvocation(credential);
+      const invocationEnv = { ...invocation.env };
+      // The host's identity, which is exactly what git would silently borrow.
+      const ambientEnv: NodeJS.ProcessEnv = options.launcherProfileRan ? {} : {
+        GIT_AUTHOR_NAME: ambient.name,
+        GIT_AUTHOR_EMAIL: ambient.email,
+        GIT_COMMITTER_NAME: ambient.name,
+        GIT_COMMITTER_EMAIL: ambient.email,
+      };
+      if (options.launcherProfileRan) {
+        // The managed launcher strips `GIT_*` ident variables from the environment and its shell
+        // profile then unsets the empty ones it left behind, so by the time git runs none of
+        // them exist. Reproduce that here instead of asserting on it.
+        for (const key of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"]) {
+          delete invocationEnv[key];
+        }
+      }
+      // Start from an environment with no git identity in it at all. The host this runs on
+      // injects its own `GIT_CONFIG_*` and `GIT_*` ident variables into every process, and
+      // inheriting them would decide the outcome before the invocation did — which is the same
+      // environment-outranks-config mechanism as the defect, and would make this test assert
+      // whatever the machine happened to be configured with instead of what was published.
+      const baseEnv: NodeJS.ProcessEnv = {};
+      for (const [key, value] of Object.entries(process.env)) {
+        if (/^(GIT_|EMAIL$)/.test(key)) continue;
+        baseEnv[key] = value;
+      }
+      const env: NodeJS.ProcessEnv = {
+        ...baseEnv,
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+        ...ambientEnv,
+        ...invocationEnv,
+      };
+      if (options.launcherProfileRan) {
+        // With the environment cleared, git falls back to configuration and then to
+        // auto-detection. Give the repository an ident of its own so the test proves the empty
+        // pair outranks one, instead of passing because the host happened to have none.
+        spawnSync("git", ["config", "user.name", ambient.name], { cwd, env });
+        spawnSync("git", ["config", "user.email", ambient.email], { cwd, env });
+      }
+      const run = (args: string[]) => new Promise<{ code: number | null; stdout: string; stderr: string }>(
+        (resolve, reject) => {
+          const child = spawn("git", args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+          let stdout = "";
+          let stderr = "";
+          child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+          child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+          child.on("error", reject);
+          child.on("close", (code) => resolve({ code, stdout, stderr }));
+        },
+      );
+      await run(["init", "--quiet"]);
+      await fs.writeFile(path.join(cwd, "README.md"), "managed commit\n");
+      await run(["add", "README.md"]);
+      const committed = await run(["commit", "--quiet", "-m", "managed change"]);
+      const head = committed.code === 0
+        ? (await run(["log", "-1", "--format=%an <%ae>"])).stdout.trim()
+        : "";
+      return { committed, head };
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  }
+
+  it("refuses to commit rather than borrow the ambient identity", async () => {
+    // The record says 100000001 and the token could not be verified. Publishing no ident at all
+    // leaves this commit succeeding under `ambient-owner`, so a bot's push lands in a person's
+    // name. Publishing an empty ident stops it.
+    const result = await commitWith(
+      {
+        token: "super-secret-token",
+        source: "managed_connection",
+        secretName: null,
+        githubIdentity: { userId: "100000001", login: "Tessalol" },
+      },
+      { name: "ambient-owner", email: "ambient-owner@example.com" },
+    );
+    expect(result.committed.code).not.toBe(0);
+    expect(result.head).toBe("");
+    expect(result.committed.stderr).toMatch(/empty ident|unable to auto-detect|identity unknown|no name was given/i);
+    // Nothing was written under the ambient identity, which is the whole point: the failure is
+    // a refusal, not a differently-attributed commit.
+    expect(result.committed.stderr).not.toContain("ambient-owner");
+  });
+
+  it("still refuses after the launcher profile strips the empty quartet", async () => {
+    // The residual hole this closes: the managed launcher unsets empty `GIT_*` ident variables
+    // in its shell profile, so the environment half of the guard does not survive to git. The
+    // empty `user.*` pair does, and the repository here carries an ident of its own precisely so
+    // this cannot pass by accident — without the pair the commit succeeds under it.
+    const result = await commitWith(
+      { token: "super-secret-token", source: "managed_connection", secretName: null },
+      { name: "ambient-owner", email: "ambient-owner@example.com" },
+      { launcherProfileRan: true },
+    );
+    expect(result.committed.code).not.toBe(0);
+    expect(result.head).toBe("");
+    expect(result.committed.stderr).toMatch(/identity unknown|empty ident|unable to auto-detect|no name was given/i);
+  });
+
+  it("still commits under the verified identity when one was published", async () => {
+    // The guard above must not cost the healthy path its commits: with a verified identity the
+    // pair is published, so the commit happens and carries that identity rather than the
+    // ambient one.
+    const result = await commitWith(
+      {
+        token: "super-secret-token",
+        source: "managed_connection",
+        secretName: null,
+        verifiedGithubIdentity: { userId: "5732579", login: "albisher" },
+      },
+      { name: "ambient-owner", email: "ambient-owner@example.com" },
+    );
+    expect(result.committed.code).toBe(0);
+    expect(result.head).toBe("albisher <5732579+albisher@users.noreply.github.com>");
+  });
+
+  it("leaves non-managed credentials free to use the ambient identity", async () => {
+    // A company secret has no tenant claim to reconcile, so this fix must not take its commits
+    // away. This is the regression the scoping in `buildGitAuthInvocation` exists to avoid.
+    const result = await commitWith(
+      { token: "super-secret-token", source: "company_secret", secretName: "deploy-key" },
+      { name: "ambient-owner", email: "ambient-owner@example.com" },
+    );
+    expect(result.committed.code).toBe(0);
+    expect(result.head).toBe("ambient-owner <ambient-owner@example.com>");
   });
 });
 
