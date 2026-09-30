@@ -9747,7 +9747,7 @@ describe("runnerd provider runtime wiring", () => {
     }
   });
 
-  it("resumes an existing scoped authority only for the exact current run", async () => {
+  it("resumes a matching scoped authority with valid history above 64 MiB", async () => {
     const stateBase = await mkdtemp(
       join(tmpdir(), "paperclip-current-scoped-state-"),
     );
@@ -9786,10 +9786,30 @@ describe("runnerd provider runtime wiring", () => {
         state.createTransport.mock.calls[0]![0].stateDirectory!;
       await mkdir(join(scopedRoot, "control-plane"), { recursive: true });
       await mkdir(join(scopedRoot, "runner"), { recursive: true });
-      await writeFile(
-        join(scopedRoot, "control-plane", "control-plane-state.json"),
-        JSON.stringify(durableControlPlaneState(identity)),
+      const controlPlaneStatePath = join(
+        scopedRoot,
+        "control-plane",
+        "control-plane-state.json",
       );
+      const controlPlaneState = JSON.stringify(
+        durableControlPlaneState(identity),
+      );
+      await writeFile(controlPlaneStatePath, controlPlaneState);
+      const extraHistoryBytes = 65 * 1024 * 1024;
+      const padding = Buffer.alloc(1024 * 1024, 0x20);
+      const stateHandle = await open(controlPlaneStatePath, "a");
+      try {
+        for (let remaining = extraHistoryBytes; remaining > 0;) {
+          const bytesToWrite = Math.min(remaining, padding.length);
+          await stateHandle.write(padding, 0, bytesToWrite);
+          remaining -= bytesToWrite;
+        }
+      } finally {
+        await stateHandle.close();
+      }
+      expect(
+        (await lstat(controlPlaneStatePath)).size,
+      ).toBeGreaterThan(64 * 1024 * 1024);
       await writeFile(
         join(scopedRoot, "runner", "runner-state.json"),
         JSON.stringify(durableRunnerState(identity, "ready")),
