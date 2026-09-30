@@ -1283,6 +1283,7 @@ const RUNTIME_TOOLS_SECURITY: Array<Record<string, string[]>> = [
 
 const RUNTIME_TOOLS_OPERATIONS = new Set([
   "POST /runtime-tools/github/credentials",
+  "POST /runtime-tools/github/push-report",
   "GET /mcp/runtime-tools",
   "POST /mcp/runtime-tools",
   "POST /runtime-tools/connections/search",
@@ -10217,6 +10218,20 @@ registerCurrentRoute({
     401: r.unauthorized,
     403: r.forbidden,
     409: r.conflict,
+  },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/runtime-tools/github/push-report",
+  tags: ["connection-intents"],
+  summary:
+    "Record one git.push activity row from a managed launcher using a run capability; browser sessions are rejected",
+  responses: {
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
   },
 });
 
