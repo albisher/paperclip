@@ -369,13 +369,15 @@ describe("reconcileGitHubIdentity", () => {
     })).toEqual({ identity: { userId: "5732579", login: "albisher" } });
   });
 
-  it("fails closed when the token cannot be verified at all", () => {
+  it("reports an unreachable GitHub as unverified, not as a contradiction", () => {
     const result = reconcileGitHubIdentity({
       claimed: { userId: "100000001", login: "etqan-bot" },
       verified: null,
     });
     expect(result.identity).toBeUndefined();
     expect(result.error).toMatch(/could not be verified/i);
+    // The distinction the caller branches on. No network is not evidence of a mismatch.
+    expect(result.failure).toBe("unverified");
   });
 
   it("refuses a tenant record whose id belongs to a different account", () => {
@@ -388,6 +390,8 @@ describe("reconcileGitHubIdentity", () => {
     expect(result.identity).toBeUndefined();
     expect(result.error).toContain("100000001");
     expect(result.error).toContain("5732579");
+    // GitHub answered here, so this is a positive claim about a working token — not a hiccup.
+    expect(result.failure).toBe("contradicted");
   });
 
   it("refuses a tenant record whose login was renamed on GitHub", () => {
@@ -397,6 +401,7 @@ describe("reconcileGitHubIdentity", () => {
     });
     expect(result.identity).toBeUndefined();
     expect(result.error).toContain("old-login");
+    expect(result.failure).toBe("contradicted");
   });
 
   it("accepts a record with no id or login, since the verified identity is authoritative", () => {

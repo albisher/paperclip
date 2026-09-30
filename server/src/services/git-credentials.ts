@@ -204,20 +204,43 @@ export async function resolveVerifiedGitHubIdentity(
 }
 
 /**
+ * How a reconciliation failed, and therefore what the caller must do about it.
+ *
+ * `unverified` and `contradicted` are both "no ident may be published", but they are not the
+ * same event and they do not justify the same response:
+ *
+ * - `unverified` means GitHub did not answer — no network, a rate limit, a token it rejected.
+ *   Nothing is known about which account the token holds, and the next request may well succeed.
+ * - `contradicted` means GitHub answered, and the answer disagrees with the stored record. That
+ *   is a positive statement about a *working* token: the credential authenticates as an account
+ *   the connection does not claim. Retrying does not change this, and no operator action short
+ *   of fixing the connection record will clear it.
+ *
+ * The distinction is the whole reason a single boolean could not carry this. Treating
+ * `contradicted` as merely "unverified" released a token GitHub had positively identified as
+ * belonging to a different account, under `status: available`, so the launcher ran git with no
+ * author at all and the operation reported the claimed account as usable. Treating `unverified`
+ * as `contradicted` would instead fail every managed grant whenever the network hiccuped, which
+ * is why the softer case must not hard-fail.
+ */
+export type GitHubIdentityFailure = "unverified" | "contradicted";
+
+/**
  * Reconcile a stored tenant identity against what the token actually is.
  *
- * Returns the identity to publish, or an error string explaining why none may be published.
- * The stored record is treated as a *claim*, not as authority: a claim that GitHub contradicts
- * is worse than no claim, because it would put commits in another account's name. A token with
- * no resolvable identity fails closed — the caller surfaces the error instead of pushing under
- * a fabricated address.
+ * Returns the identity to publish, or an error string plus the kind of failure. The stored
+ * record is treated as a *claim*, not as authority: a claim that GitHub contradicts is worse
+ * than no claim, because it would put commits in another account's name.
  */
 export function reconcileGitHubIdentity(input: {
   claimed?: { userId?: string | null; login?: string | null } | null;
   verified: VerifiedGitHubIdentity | null;
-}): { identity?: { userId: string; login: string }; error?: string } {
+}): { identity?: { userId: string; login: string }; error?: string; failure?: GitHubIdentityFailure } {
   if (!input.verified) {
-    return { error: "The GitHub credential could not be verified against GitHub, so no commit identity can be established" };
+    return {
+      error: "The GitHub credential could not be verified against GitHub, so no commit identity can be established",
+      failure: "unverified",
+    };
   }
   const claimedId = input.claimed?.userId?.trim() || null;
   const claimedLogin = input.claimed?.login?.trim() || null;
@@ -226,11 +249,13 @@ export function reconcileGitHubIdentity(input: {
     // ids are the whole diagnosis. No token material appears here.
     return {
       error: `The managed GitHub identity is recorded as account ${claimedId} but the credential authenticates as ${input.verified.userId} (${input.verified.login}); refusing to commit under a mismatched identity`,
+      failure: "contradicted",
     };
   }
   if (claimedLogin && claimedLogin.toLowerCase() !== input.verified.login.toLowerCase()) {
     return {
       error: `The managed GitHub identity is recorded as "${claimedLogin}" but the credential authenticates as "${input.verified.login}"; refusing to commit under a mismatched identity`,
+      failure: "contradicted",
     };
   }
   return { identity: { userId: input.verified.userId, login: input.verified.login } };
@@ -708,18 +733,31 @@ export async function resolveManagedGitHubCredential(
     // the stand-in `100000001` — would otherwise put every agent commit in an unrelated
     // account's name, so the claim is dropped rather than published.
     //
-    // Verification gates the *ident*, not the credential. Whether a resolved token should
-    // report `available` is a separate contract owned by the operation-credentials layer, and
-    // conflating the two made every managed grant unusable whenever `/user` could not be
-    // reached: no network, a rate limit, or a test double all produced a hard failure instead
-    // of a commit with no forged identity. An unverifiable token now yields a credential with
-    // no `verifiedGithubIdentity`, and `buildGitAuthInvocation` publishes no ident for that
-    // case, so git falls back to the ambient host identity. What can never happen is a commit
-    // carrying an address GitHub does not resolve to the account that authored it.
+    // The two failure modes are handled differently on purpose.
+    //
+    // A contradiction fails the whole acquisition. GitHub answered, and the answer was a
+    // *working* token belonging to an account the connection does not claim. Releasing that
+    // token — even with the claim stripped — still hands git a credential that can push, while
+    // the broker reports the claimed account as `available` and the launcher runs it with no
+    // author identity. The operation then either commits as the ambient host identity or fails,
+    // and in both cases the operator is told an account is available that is not the one whose
+    // authority the push carries. Refusing is the only response that cannot misattribute.
+    //
+    // A failure to verify does not fail the acquisition. GitHub not answering says nothing about
+    // which account the token holds, and the next request may well succeed; the next attempt on
+    // the same grant is re-verified anyway. Conflating the two made every managed grant unusable
+    // whenever `/user` could not be reached — no network, a rate limit, or a test double all
+    // produced a hard failure instead of a commit with no forged identity. Such a token yields a
+    // credential with no `verifiedGithubIdentity`, and `buildGitAuthInvocation` publishes no ident
+    // for that case, so git falls back to the ambient host identity. What can never happen is a
+    // commit carrying an address GitHub does not resolve to the account that authored it.
     const reconciliation = reconcileGitHubIdentity({
       claimed: { userId: github.userId, login: github.login },
       verified: await resolveVerifiedGitHubIdentity(token),
     });
+    if (reconciliation.failure === "contradicted") {
+      return { configured: true, identitySource: selection.identitySource, error: reconciliation.error };
+    }
     return {
       configured: true, identitySource: selection.identitySource,
       credential: {

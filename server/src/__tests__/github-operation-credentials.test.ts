@@ -258,13 +258,9 @@ const support = await getEmbeddedPostgresTestSupport();
           })
           .where(eq(connectionGrants.id, granted.id));
       }
-      async function resolveAs(verified: { id: number; login: string }) {
+      async function resolveWithFetch(fetchImpl: () => Promise<unknown>) {
         resetGitHubIdentityCache();
-        const fetchImpl = vi.fn(async () => ({
-          ok: true,
-          json: async () => verified,
-        }));
-        vi.stubGlobal("fetch", fetchImpl);
+        vi.stubGlobal("fetch", vi.fn(fetchImpl) as unknown as typeof fetch);
         try {
           return await resolveGitHubOperationCredentials(db, input);
         } finally {
@@ -272,20 +268,37 @@ const support = await getEmbeddedPostgresTestSupport();
           resetGitHubIdentityCache();
         }
       }
+      async function resolveAs(verified: { id: number; login: string }) {
+        return await resolveWithFetch(async () => ({ ok: true, json: async () => verified }));
+      }
 
-      // A claim GitHub contradicts produces no ident at all. Before this, the claim was
-      // published verbatim, so every commit on this connection was a verified-looking
-      // contribution to `Tessalol`.
+      // GitHub answered, and the answer contradicts the stored record. The token is a *working*
+      // credential for an account this connection does not claim, so it is refused outright:
+      // publishing no ident while still releasing it would let the launcher run git with no
+      // author and report the stranger's account as `available`.
       await claimAs("100000001", "Tessalol");
       const contradicted = await resolveAs({ id: 5732579, login: "albisher" });
-      expect(contradicted).toMatchObject({
-        status: "available",
-        // The claim is still reported so a wrong connection record stays visible to an operator.
-        login: "Tessalol",
+      expect(contradicted.status).toBe("unavailable");
+      expect(contradicted.env).toEqual({});
+      // The token itself must not survive a refused reconciliation.
+      expect(JSON.stringify(contradicted)).not.toContain("test-token-");
+      // No ident of any kind reaches git. The refused ids are still named in the reason,
+      // because the operator has to be able to tell which connection record to fix.
+      expect(contradicted.env).toEqual({});
+      expect(contradicted.reason).toContain("100000001");
+      expect(contradicted.reason).toMatch(/mismatched identity/i);
+
+      // GitHub not answering says nothing about which account the token holds, so it must not
+      // hard-fail: a rate limit or an offline runner would otherwise take out every managed
+      // grant. The credential stays usable, and it simply carries no ident.
+      await claimAs("100000001", "Tessalol");
+      const unreachable = await resolveWithFetch(async () => {
+        throw new Error("network down");
       });
-      expect(contradicted.env.GIT_AUTHOR_EMAIL).toBeUndefined();
-      expect(contradicted.env.GIT_COMMITTER_EMAIL).toBeUndefined();
-      expect(JSON.stringify(contradicted.env)).not.toContain("100000001");
+      expect(unreachable.status).toBe("available");
+      expect(unreachable.env.GIT_AUTHOR_EMAIL).toBeUndefined();
+      expect(unreachable.env.GIT_COMMITTER_EMAIL).toBeUndefined();
+      expect(JSON.stringify(unreachable.env)).not.toContain("100000001");
 
       // A claim GitHub agrees with is published from GitHub's own answer, so the healthy path
       // still yields a real ident rather than silently degrading to the ambient host identity.
