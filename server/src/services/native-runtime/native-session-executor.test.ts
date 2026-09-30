@@ -6,6 +6,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readdir,
   realpath,
   readFile,
@@ -10040,7 +10041,14 @@ describe("runnerd provider runtime wiring", () => {
     },
   );
 
-  it.each(["missing", "malformed", "unknown_schema", "mismatched", "oversized"] as const)(
+  it.each([
+    "missing",
+    "malformed",
+    "unknown_schema",
+    "mismatched",
+    "large_mismatched",
+    "oversized",
+  ] as const)(
     "fails closed on %s durable identity in an existing scoped root",
     async (caseName) => {
       const stateBase = await mkdtemp(
@@ -10101,6 +10109,25 @@ describe("runnerd provider runtime wiring", () => {
                   ),
           );
         }
+        if (caseName === "large_mismatched") {
+          await writeFile(
+            join(scopedRoot, "control-plane", "control-plane-state.json"),
+            JSON.stringify({
+              ...durableControlPlaneState({
+                runId: scopedExecution.binding.runId,
+                normalizedSessionId: "session-owned-by-another-scope",
+                runnerInstanceId: "runner-owned-by-another-scope",
+                environmentLeaseId: "lease-owned-by-another-scope",
+              }),
+              committedEvents: [
+                {
+                  eventType: "history",
+                  payload: { text: "x".repeat(64 * 1024 * 1024 + 1) },
+                },
+              ],
+            }),
+          );
+        }
         if (caseName === "oversized") {
           const identity = {
             runId: scopedExecution.binding.runId,
@@ -10108,12 +10135,33 @@ describe("runnerd provider runtime wiring", () => {
             runnerInstanceId: `runner-${caseName}-scoped-state`,
             environmentLeaseId: scopedExecution.binding.executionWorkspaceId,
           };
-          // Valid JSON and valid ready authority: only the byte bound rejects
-          // this file. Malformed sparse padding would not test that boundary.
-          await writeFile(
-            join(scopedRoot, "control-plane", "control-plane-state.json"),
-            JSON.stringify(durableControlPlaneState(identity)).padEnd(64 * 1024 * 1024 + 1, " "),
+          // Keep the file valid JSON so only the byte limit rejects it. Append
+          // bounded whitespace chunks to avoid a 256 MiB test allocation.
+          const statePath = join(
+            scopedRoot,
+            "control-plane",
+            "control-plane-state.json",
           );
+          const serializedState = JSON.stringify(
+            durableControlPlaneState(identity),
+          );
+          await writeFile(
+            statePath,
+            serializedState,
+          );
+          const padding = Buffer.alloc(1024 * 1024, 0x20);
+          const remainingBytes =
+            256 * 1024 * 1024 + 1 - Buffer.byteLength(serializedState);
+          const stateHandle = await open(statePath, "a");
+          try {
+            for (let remaining = remainingBytes; remaining > 0;) {
+              const bytesToWrite = Math.min(remaining, padding.length);
+              await stateHandle.write(padding, 0, bytesToWrite);
+              remaining -= bytesToWrite;
+            }
+          } finally {
+            await stateHandle.close();
+          }
           await mkdir(join(scopedRoot, "runner"), { recursive: true });
           await writeFile(
             join(scopedRoot, "runner", "runner-state.json"),
@@ -10138,7 +10186,7 @@ describe("runnerd provider runtime wiring", () => {
         expect(quarantineEntries).toHaveLength(1);
         expect(quarantineEntries[0]!.isDirectory()).toBe(true);
         expect(quarantineEntries[0]!.name).toContain(
-          caseName === "mismatched"
+          caseName === "mismatched" || caseName === "large_mismatched"
             ? ".identity_mismatch."
             : ".identity_indeterminate.",
         );
