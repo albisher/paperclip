@@ -907,6 +907,10 @@ describe("TaskChatRunnerTurn", () => {
         ?.textContent,
     ).toContain("Completed successfully.");
     expect(
+      container.querySelector('[data-testid="task-chat-final-response"]')
+        ?.classList.contains("pl-0.5"),
+    ).toBe(true);
+    expect(
       container.querySelectorAll('[data-testid="task-chat-agent-avatar"]'),
     ).toHaveLength(1);
     expect(

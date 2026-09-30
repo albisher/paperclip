@@ -249,6 +249,7 @@ describe("TaskChatTurn", () => {
     expect(final?.textContent).toContain(
       "Waiting for Review browser RTS plan.",
     );
+    expect(final?.classList.contains("pl-0.5")).toBe(true);
     expect(timeline?.compareDocumentPosition(final!)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
