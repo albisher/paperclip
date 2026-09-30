@@ -9791,25 +9791,61 @@ describe("runnerd provider runtime wiring", () => {
         "control-plane",
         "control-plane-state.json",
       );
-      const controlPlaneState = JSON.stringify(
-        durableControlPlaneState(identity),
-      );
-      await writeFile(controlPlaneStatePath, controlPlaneState);
-      const extraHistoryBytes = 65 * 1024 * 1024;
-      const padding = Buffer.alloc(1024 * 1024, 0x20);
+      const stateWithHistory = JSON.stringify({
+        ...durableControlPlaneState(identity),
+        committedEvents: [],
+      });
+      const committedEventsMarker = '"committedEvents":[]';
+      const eventsStart = stateWithHistory.indexOf(committedEventsMarker);
+      expect(eventsStart).toBeGreaterThanOrEqual(0);
+      const eventArrayStart = eventsStart + '"committedEvents":'.length;
+      const historyPrefix = stateWithHistory.slice(0, eventArrayStart + 1);
+      const historySuffix = stateWithHistory.slice(eventArrayStart + 2);
+      const payloadBytesPerEvent = 512 * 1024;
+      const eventCount = 128;
+      const delta = "x".repeat(payloadBytesPerEvent);
+      const event = (sourceSeq: number) => {
+        const sourceEventId = `event-current-scoped-state-${sourceSeq}`;
+        return JSON.stringify({
+          sourceSeq,
+          sourceEventId,
+          eventType: "item.delta",
+          priority: 1,
+          envelope: {
+            schema: "paperclip.prp.event.v1",
+            schemaVersion: 1,
+            sourceKind: "runner",
+            sourceInstanceId: identity.runnerInstanceId,
+            sourceEventId,
+            sourceSeq,
+            normalizedSessionId: identity.normalizedSessionId,
+            runId: identity.runId,
+            turnId: "turn-current-scoped-state",
+            itemId: "item-current-scoped-state",
+            eventType: "item.delta",
+            priority: 1,
+            emittedAt: "2026-09-30T00:00:00.000Z",
+            payload: { delta },
+          },
+          deliveryCount: 1,
+          logicalEffectCount: 1,
+        });
+      };
+      await writeFile(controlPlaneStatePath, historyPrefix);
       const stateHandle = await open(controlPlaneStatePath, "a");
       try {
-        for (let remaining = extraHistoryBytes; remaining > 0;) {
-          const bytesToWrite = Math.min(remaining, padding.length);
-          await stateHandle.write(padding, 0, bytesToWrite);
-          remaining -= bytesToWrite;
+        for (let index = 0; index < eventCount; index += 1) {
+          if (index > 0) await stateHandle.write(",");
+          await stateHandle.write(event(index + 1));
         }
+        await stateHandle.write("]");
+        await stateHandle.write(historySuffix);
       } finally {
         await stateHandle.close();
       }
-      expect(
-        (await lstat(controlPlaneStatePath)).size,
-      ).toBeGreaterThan(64 * 1024 * 1024);
+      expect((await lstat(controlPlaneStatePath)).size).toBeGreaterThan(
+        64 * 1024 * 1024,
+      );
       await writeFile(
         join(scopedRoot, "runner", "runner-state.json"),
         JSON.stringify(durableRunnerState(identity, "ready")),

@@ -6392,7 +6392,7 @@ it.each([
   },
 );
 
-it.each([0, 65 * 1024 * 1024])(
+it.each([0, 193 * 1024 * 1024])(
   "probes an exact-authority resume with %i extra journal bytes and confirms its live provider identity",
   async (extraJournalBytes) => {
     const stateDirectory = await mkdtemp(
