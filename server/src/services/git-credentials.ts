@@ -153,15 +153,27 @@ export function resetGitHubIdentityCache(): void {
 }
 
 /**
+ * Whether a GitHub response that carries an error is a rate limit rather than a refusal.
+ *
+ * GitHub spends the same 403 for "this token is not an account" and for "you have used up your
+ * requests", so the status code cannot separate them. The rate-limit headers can, and this is the
+ * same test the GitHub object integration applies to its own responses: an exhausted quota says
+ * nothing at all about whether the credential is real.
+ */
+function isRateLimitedResponse(response: Response): boolean {
+  return response.headers.get("x-ratelimit-remaining") === "0";
+}
+
+/**
  * The answer to "who is this token", split by how much the answer is worth.
  *
  * `rejected` and `unreachable` both answer "this token has no identity", but only one of them
- * says anything about the token itself. A 401 or 403 is GitHub stating that these credentials
- * are not an account — a placeholder row, a revoked token, a secret pasted into the wrong
- * field — and that verdict survives any later network recovery, so it is definitive.
- * `unreachable` is the absence of an answer: no route, a timeout, a 5xx, a rate limit. Folding
- * both into one `null` is what let a credential GitHub had already refused keep reporting
- * `available` and still be handed to git.
+ * says anything about the token itself. A 401, or a 403 that is not a rate limit, is GitHub
+ * stating that these credentials are not an account — a placeholder row, a revoked token, a
+ * secret pasted into the wrong field — and that verdict survives any later network recovery, so
+ * it is definitive. `unreachable` is the absence of an answer: no route, a timeout, a 5xx, a
+ * rate limit. Folding both into one `null` is what let a credential GitHub had already refused
+ * keep reporting `available` and still be handed to git.
  */
 export type GitHubIdentityResolution =
   | { status: "verified"; identity: VerifiedGitHubIdentity }
@@ -202,6 +214,17 @@ export async function resolveGitHubIdentity(
     });
   } catch {
     return { status: "unreachable", reason: "GitHub could not be reached to verify the credential" };
+  }
+  if (response.status === 403 && isRateLimitedResponse(response)) {
+    // GitHub answers a rate limit with the same 403 it uses to refuse a token, so the status
+    // code alone cannot tell "this credential is not an account" from "stop asking". The
+    // rate-limit headers are the only thing that separates them, and reading this as a refusal
+    // would tell an operator to replace a token that is working. Matches the distinction
+    // `github-external-object-provider.ts` already draws on its own GitHub responses.
+    return {
+      status: "unreachable",
+      reason: `GitHub rate limited the identity check (HTTP 403); the credential was not judged`,
+    };
   }
   if (response.status === 401 || response.status === 403) {
     // Definitive, not transient: GitHub parsed the request and refused these credentials, so

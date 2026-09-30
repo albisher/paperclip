@@ -386,8 +386,15 @@ describe("resolveVerifiedGitHubIdentity", () => {
   function jsonResponse(body: unknown, ok = true) {
     return { ok, status: ok ? 200 : 401, json: async () => body } as unknown as Response;
   }
-  function statusResponse(status: number) {
-    return { ok: false, status, json: async () => ({ message: "nope" }) } as unknown as Response;
+  function statusResponse(status: number, headers: Record<string, string> = {}) {
+    // A real `Response` always carries `headers`; the identity check reads the rate-limit
+    // headers off a 403, so a stub without them would not describe anything GitHub can send.
+    return {
+      ok: false,
+      status,
+      headers: new Headers(headers),
+      json: async () => ({ message: "nope" }),
+    } as unknown as Response;
   }
 
   it("returns the id and login GitHub reports for the token", async () => {
@@ -441,6 +448,34 @@ describe("resolveVerifiedGitHubIdentity", () => {
       );
       expect(identity, label).toBeNull();
     }
+    resetGitHubIdentityCache();
+  });
+
+  it("reads a rate-limited 403 as an unanswered question, not a refused token", async () => {
+    // GitHub spends the same 403 on "this token is not an account" and on "stop asking". Reading
+    // the second one as the first would tell an operator to replace a credential that works.
+    // The rate-limit headers are the only thing that tells them apart.
+    resetGitHubIdentityCache();
+    const rateLimited = await resolveGitHubIdentity("rate-limited", {
+      now: 1_000,
+      fetchImpl: (async () => statusResponse(403, {
+        "x-ratelimit-remaining": "0",
+        "x-ratelimit-reset": "1790966439",
+      })) as unknown as typeof fetch,
+    });
+    expect(rateLimited.status).toBe("unreachable");
+    if (rateLimited.status === "unreachable") {
+      expect(rateLimited.reason).toMatch(/rate limit/i);
+      // The operator-facing reason must not tell them to replace a working credential.
+      expect(rateLimited.reason).not.toMatch(/reject/i);
+    }
+
+    // A 403 with quota left is a real refusal and must keep being one.
+    const refused = await resolveGitHubIdentity("still-refused", {
+      now: 1_000,
+      fetchImpl: (async () => statusResponse(403, { "x-ratelimit-remaining": "4999" })) as unknown as typeof fetch,
+    });
+    expect(refused.status).toBe("rejected");
     resetGitHubIdentityCache();
   });
 
@@ -616,8 +651,18 @@ describe("a managed commit with no verified identity (real git, no network)", ()
         // With the environment cleared, git falls back to configuration and then to
         // auto-detection. Give the repository an ident of its own so the test proves the empty
         // pair outranks one, instead of passing because the host happened to have none.
-        spawnSync("git", ["config", "user.name", ambient.name], { cwd, env });
-        spawnSync("git", ["config", "user.email", ambient.email], { cwd, env });
+        // `init` has to come first: before a repository exists `git config user.*` is a global
+        // write, and the global config here is `/dev/null`, so the ident would be discarded
+        // silently and this case would prove nothing.
+        const seeded = spawnSync("git", ["init", "--quiet"], { cwd, env });
+        const named = spawnSync("git", ["config", "user.name", ambient.name], { cwd, env });
+        const emailed = spawnSync("git", ["config", "user.email", ambient.email], { cwd, env });
+        expect({ init: seeded.status, name: named.status, email: emailed.status })
+          .toEqual({ init: 0, name: 0, email: 0 });
+        // Read the ident back out of the repository so a silently-dropped write fails this case
+        // instead of quietly restoring the behaviour under test.
+        const readBack = spawnSync("git", ["config", "--local", "--get", "user.email"], { cwd, env, encoding: "utf8" });
+        expect(readBack.stdout.trim()).toBe(ambient.email);
       }
       const run = (args: string[]) => new Promise<{ code: number | null; stdout: string; stderr: string }>(
         (resolve, reject) => {
@@ -630,7 +675,7 @@ describe("a managed commit with no verified identity (real git, no network)", ()
           child.on("close", (code) => resolve({ code, stdout, stderr }));
         },
       );
-      await run(["init", "--quiet"]);
+      if (!options.launcherProfileRan) await run(["init", "--quiet"]);
       await fs.writeFile(path.join(cwd, "README.md"), "managed commit\n");
       await run(["add", "README.md"]);
       const committed = await run(["commit", "--quiet", "-m", "managed change"]);

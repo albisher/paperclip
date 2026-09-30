@@ -266,7 +266,14 @@ const support = await getEmbeddedPostgresTestSupport();
         const fetchImpl = vi.fn(async () => {
           if ("throw" in answer) throw new Error(answer.throw);
           if ("status" in answer) {
-            return { ok: false, status: answer.status, json: async () => ({ message: "nope" }) };
+            return {
+              ok: false,
+              status: answer.status,
+              // Every real `Response` carries `headers`, and the identity check reads the
+              // rate-limit headers off a 403 to tell a refusal from an exhausted quota.
+              headers: new Headers(),
+              json: async () => ({ message: "nope" }),
+            };
           }
           return { ok: true, status: 200, json: async () => answer };
         });
