@@ -7844,6 +7844,42 @@ export function issueService(db: Db) {
     return row;
   }
 
+  /**
+   * Attribute an issue-less wake to the issue it just claimed.
+   *
+   * A run persisted with no context snapshot (heartbeat_timer, health recovery)
+   * has no source issue, so the cross-issue influence gate refuses every issue
+   * write that run makes — including writes to the issue it just checked out —
+   * with cross_issue_influence_run_context_required. Checkout is the claim that
+   * establishes attribution, so stamp the snapshot here alongside
+   * issues.checkoutRunId.
+   *
+   * Runs that already carry a scope are left untouched: a run scoped to issue A
+   * that checks out issue B is a genuine cross-issue write, keeps A as its
+   * source, and stays counted against the cap.
+   */
+  async function stampRunSourceIssueOnCheckout(
+    checkoutRunId: string | null,
+    issueId: string,
+  ): Promise<void> {
+    if (!checkoutRunId) return;
+    await db
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: sql`
+          coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb)
+          || jsonb_build_object('issueId', ${issueId}::text)
+        `,
+      })
+      .where(
+        and(
+          eq(heartbeatRuns.id, checkoutRunId),
+          sql`coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId', '') = ''`,
+          sql`coalesce(${heartbeatRuns.contextSnapshot} ->> 'taskId', '') = ''`,
+        ),
+      );
+  }
+
   const service = {
     clearExecutionRunIfTerminal,
     clearCheckoutRunIfTerminal,
@@ -11388,6 +11424,13 @@ export function issueService(db: Db) {
         kind: "work",
       });
 
+      // Every successful checkout path returns through `attributed`, so the run
+      // snapshot is stamped exactly when issues.checkoutRunId is written.
+      const attributed = async <T>(row: T): Promise<T> => {
+        await stampRunSourceIssueOnCheckout(checkoutRunId, id);
+        return row;
+      };
+
       const now = new Date();
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(
         issueCompany.companyId,
@@ -11480,7 +11523,7 @@ export function issueService(db: Db) {
 
       if (updated) {
         const [enriched] = await withIssueLabels(db, [updated]);
-        return enriched;
+        return await attributed(enriched);
       }
 
       const current = await db
@@ -11526,7 +11569,7 @@ export function issueService(db: Db) {
           )
           .returning()
           .then((rows) => rows[0] ?? null);
-        if (adopted) return adopted;
+        if (adopted) return await attributed(adopted);
       }
 
       if (
@@ -11550,7 +11593,7 @@ export function issueService(db: Db) {
             .then((rows) => rows[0] ?? null);
           if (!row) throw notFound("Issue not found");
           const [enriched] = await withIssueLabels(db, [row]);
-          return enriched;
+          return await attributed(enriched);
         }
       }
 
@@ -11598,7 +11641,7 @@ export function issueService(db: Db) {
             .then((rows) => rows[0] ?? null);
           if (adopted) {
             const [enriched] = await withIssueLabels(db, [adopted]);
-            return enriched;
+            return await attributed(enriched);
           }
         }
       }
@@ -11616,7 +11659,7 @@ export function issueService(db: Db) {
           .then((rows) => rows[0] ?? null);
         if (!row) throw notFound("Issue not found");
         const [enriched] = await withIssueLabels(db, [row]);
-        return enriched;
+        return await attributed(enriched);
       }
 
       throw conflict("Issue checkout conflict", {
