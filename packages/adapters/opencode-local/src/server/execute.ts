@@ -52,6 +52,7 @@ import {
   resolveLegacyPaperclipDesiredSkillNames,
 } from "@paperclipai/adapter-utils/server-utils";
 import { isOpenCodeUnknownSessionError, parseOpenCodeJsonl } from "./parse.js";
+import { resolveOpenCodeRunCost } from "./pricing.js";
 import {
   ensureOpenCodeModelConfiguredAndAvailable,
   isTruthyEnvFlag,
@@ -708,6 +709,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         stderrLine ||
         `OpenCode exited with code ${synthesizedExitCode ?? -1}`;
       const modelId = model || null;
+      const pricedCost = resolveOpenCodeRunCost({
+        model: modelId,
+        inputTokens: attempt.parsed.usage.inputTokens,
+        cachedInputTokens: attempt.parsed.usage.cachedInputTokens,
+        outputTokens: attempt.parsed.usage.outputTokens,
+        providerReportedCostUsd: attempt.parsed.costUsd,
+      });
 
       return {
         exitCode: synthesizedExitCode,
@@ -729,8 +737,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         provider: parseModelProvider(modelId),
         biller: resolveOpenCodeBiller(runtimeEnv, parseModelProvider(modelId)),
         model: modelId,
-        billingType: "unknown",
-        costUsd: attempt.parsed.costUsd,
+        billingType: pricedCost?.billingType ?? "unknown",
+        costUsd: pricedCost?.costUsd ?? attempt.parsed.costUsd,
         resultJson: {
           stdout: attempt.proc.stdout,
           stderr: attempt.proc.stderr,

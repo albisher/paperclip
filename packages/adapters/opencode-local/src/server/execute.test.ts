@@ -347,3 +347,78 @@ describe("ensureRemoteOpenCodeModelConfiguredAndAvailable — probe is non-fatal
     ).rejects.toThrow("Configured OpenCode model is unavailable on the remote execution target");
   });
 });
+
+describe("OpenCode cost reporting (ETQ-708)", () => {
+  let configHome: string;
+
+  beforeEach(async () => {
+    configHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-test-config-"));
+    vi.stubEnv("XDG_CONFIG_HOME", configHome);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(configHome, { recursive: true, force: true });
+  });
+
+  async function runWithModel(model: string) {
+    const commandPath = path.join(configHome, "fake-opencode");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    runProcessMock.mockReset();
+    runProcessMock.mockResolvedValue(
+      probeResult({
+        stdout: [
+          JSON.stringify({
+            type: "text",
+            sessionID: "session_123",
+            part: { text: "Done" },
+          }),
+          JSON.stringify({
+            type: "step_finish",
+            sessionID: "session_123",
+            part: {
+              reason: "done",
+              cost: 0,
+              tokens: {
+                input: 100_000,
+                output: 16_000,
+                reasoning: 0,
+                cache: { read: 4_000_000, write: 0 },
+              },
+            },
+          }),
+        ].join("\n"),
+      }),
+    );
+    return execute({
+      runId: "pricing-run",
+      agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { command: commandPath, cwd: configHome, model, env: { OPENCODE_ALLOW_ALL_MODELS: "1" } },
+      context: { conversationMode: false },
+      onLog: async () => {},
+      onMeta: async () => {},
+    });
+  }
+
+  it("prices a metered MiniMax-M3 step-finish when OpenCode reports cost 0", async () => {
+    const result = await runWithModel("minimax-coding-plan/MiniMax-M3");
+    expect(result.exitCode).toBe(0);
+    expect(result.usage).toEqual({ inputTokens: 100_000, cachedInputTokens: 4_000_000, outputTokens: 16_000 });
+    expect(result.costUsd).toBeCloseTo(0.1692, 10);
+    expect(result.billingType).toBe("metered_api");
+    expect(result.model).toBe("minimax-coding-plan/MiniMax-M3");
+  });
+
+  it("keeps subscription-included models at zero cost", async () => {
+    const result = await runWithModel("ollama/qwen3.5:2b-mlx");
+    expect(result.costUsd).toBe(0);
+    expect(result.billingType).toBe("subscription_included");
+  });
+
+  it("leaves models without rates at the provider-reported cost", async () => {
+    const result = await runWithModel("mimo/mimo-v2.6-flash");
+    expect(result.costUsd).toBe(0);
+    expect(result.billingType).toBe("unknown");
+  });
+});
