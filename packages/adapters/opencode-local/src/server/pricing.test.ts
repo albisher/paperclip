@@ -41,7 +41,15 @@ describe("resolveOpenCodeRunCost", () => {
   });
 
   it("keeps zero cost for subscription models", () => {
-    for (const model of ["ollama/qwen3.5:2b-mlx", "opencode/mimo-v2.6-flash-free", "ollama/llama3.2"]) {
+    for (const model of [
+      "ollama/qwen3.5:2b-mlx",
+      "opencode/mimo-v2.6-flash-free",
+      "ollama/llama3.2",
+      "opencode/longcat-2.5-preview-free",
+      "opencode/space-bunny-free",
+      "opencode/nemotron-3.5-lightning-free",
+      "opencode/nemotron-3-ultra-free",
+    ]) {
       const cost = resolveOpenCodeRunCost({
         model,
         inputTokens: 100_000,
@@ -115,7 +123,11 @@ describe("loadOpenCodeModelPricing", () => {
       "ollama/qwen2.5:1.5b",
       "ollama/qwen3.5:2b-mlx",
       "opencode/deepseek-v4-flash-free",
+      "opencode/longcat-2.5-preview-free",
       "opencode/mimo-v2.6-flash-free",
+      "opencode/nemotron-3-ultra-free",
+      "opencode/nemotron-3.5-lightning-free",
+      "opencode/space-bunny-free",
     ]) {
       expect(pricing[model], model).toBeDefined();
     }
@@ -173,9 +185,45 @@ describe("loadOpenCodeModelPricing", () => {
 
   it("resolves exact model ids only, trimming stray whitespace", () => {
     expect(resolveOpenCodeModelRates("mimo/mimo-v2.6-flash")).toBeNull();
-    expect(resolveOpenCodeModelRates("opencode/space-bunny-free")).toBeNull();
+    expect(resolveOpenCodeModelRates("hermes-agent")).toBeNull();
     expect(resolveOpenCodeModelRates(" opencode/mimo-v2.6-flash-free ")?.billingType).toBe(
       "subscription_included",
     );
+  });
+});
+
+describe("opencode free-tier fallback coverage (ETQ-762)", () => {
+  const freeTierModels = [
+    "opencode/longcat-2.5-preview-free",
+    "opencode/space-bunny-free",
+    "opencode/nemotron-3.5-lightning-free",
+    "opencode/nemotron-3-ultra-free",
+  ];
+
+  it("resolves rates for every opencode free-tier model in ai_model_pricing", () => {
+    for (const model of freeTierModels) {
+      const rates = resolveOpenCodeModelRates(model);
+      expect(rates, model).not.toBeNull();
+      expect(rates?.billingType, model).toBe("subscription_included");
+      expect(rates?.inputCentsPer1k, model).toBe(0);
+      expect(rates?.outputCentsPer1k, model).toBe(0);
+      expect(rates?.cachedInputCentsPer1k, model).toBe(0);
+    }
+  });
+
+  it("prices a step-finish with tokens as zero-cost subscription usage", () => {
+    for (const model of freeTierModels) {
+      const cost = resolveOpenCodeRunCost({
+        model,
+        inputTokens: 188_600,
+        cachedInputTokens: 2_173_184,
+        outputTokens: 15_439,
+        providerReportedCostUsd: 0,
+      });
+      expect(cost, model).not.toBeNull();
+      expect(cost?.costUsd, model).toBe(0);
+      expect(cost?.billingType, model).toBe("subscription_included");
+      expect(cost?.source, model).toBe("model_pricing");
+    }
   });
 });

@@ -46,7 +46,31 @@ const FALLBACK_MODEL_PRICING: Readonly<Record<string, OpenCodeModelRates>> = Obj
     outputCentsPer1k: 0,
     cachedInputCentsPer1k: 0,
   },
+  "opencode/longcat-2.5-preview-free": {
+    billingType: "subscription_included",
+    inputCentsPer1k: 0,
+    outputCentsPer1k: 0,
+    cachedInputCentsPer1k: 0,
+  },
   "opencode/mimo-v2.6-flash-free": {
+    billingType: "subscription_included",
+    inputCentsPer1k: 0,
+    outputCentsPer1k: 0,
+    cachedInputCentsPer1k: 0,
+  },
+  "opencode/nemotron-3-ultra-free": {
+    billingType: "subscription_included",
+    inputCentsPer1k: 0,
+    outputCentsPer1k: 0,
+    cachedInputCentsPer1k: 0,
+  },
+  "opencode/nemotron-3.5-lightning-free": {
+    billingType: "subscription_included",
+    inputCentsPer1k: 0,
+    outputCentsPer1k: 0,
+    cachedInputCentsPer1k: 0,
+  },
+  "opencode/space-bunny-free": {
     billingType: "subscription_included",
     inputCentsPer1k: 0,
     outputCentsPer1k: 0,
