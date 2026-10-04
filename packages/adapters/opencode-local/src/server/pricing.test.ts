@@ -115,7 +115,11 @@ describe("loadOpenCodeModelPricing", () => {
       "ollama/qwen2.5:1.5b",
       "ollama/qwen3.5:2b-mlx",
       "opencode/deepseek-v4-flash-free",
+      "opencode/longcat-2.5-preview-free",
       "opencode/mimo-v2.6-flash-free",
+      "opencode/nemotron-3-ultra-free",
+      "opencode/nemotron-3.5-lightning-free",
+      "opencode/space-bunny-free",
     ]) {
       expect(pricing[model], model).toBeDefined();
     }
@@ -173,9 +177,41 @@ describe("loadOpenCodeModelPricing", () => {
 
   it("resolves exact model ids only, trimming stray whitespace", () => {
     expect(resolveOpenCodeModelRates("mimo/mimo-v2.6-flash")).toBeNull();
-    expect(resolveOpenCodeModelRates("opencode/space-bunny-free")).toBeNull();
+    expect(resolveOpenCodeModelRates("opencode/space-bunny")).toBeNull();
     expect(resolveOpenCodeModelRates(" opencode/mimo-v2.6-flash-free ")?.billingType).toBe(
       "subscription_included",
     );
+    expect(resolveOpenCodeModelRates("opencode/space-bunny-free")?.billingType).toBe(
+      "subscription_included",
+    );
+  });
+});
+
+describe("opencode free-model fallback coverage", () => {
+  const freeModels = [
+    "opencode/longcat-2.5-preview-free",
+    "opencode/space-bunny-free",
+    "opencode/nemotron-3.5-lightning-free",
+    "opencode/nemotron-3-ultra-free",
+  ];
+
+  it.each(freeModels)("resolves %s as subscription-included at zero rates", (model) => {
+    const rates = resolveOpenCodeModelRates(model);
+    expect(rates).not.toBeNull();
+    expect(rates?.billingType).toBe("subscription_included");
+    expect(rates?.inputCentsPer1k).toBe(0);
+    expect(rates?.outputCentsPer1k).toBe(0);
+    expect(rates?.cachedInputCentsPer1k).toBe(0);
+  });
+
+  it.each(freeModels)("prices %s step-finish usage at zero cost", (model) => {
+    const cost = resolveOpenCodeRunCost({
+      model,
+      ...meteredUsage,
+      providerReportedCostUsd: 0,
+    });
+    expect(cost?.costUsd).toBe(0);
+    expect(cost?.billingType).toBe("subscription_included");
+    expect(cost?.source).toBe("model_pricing");
   });
 });
