@@ -240,10 +240,18 @@ async function callTerminalTool(promptBody) {
     const rejected = await mcpRequest("tools/call", { name: "paperclip_finish", arguments: bad });
     await writeFile(join(process.env.XDG_DATA_HOME, "fake-criteria-repair.json"), JSON.stringify(rejected));
   }
-  return mcpRequest("tools/call", {
+  const call = () => mcpRequest("tools/call", {
     name: blocked ? "paperclip_block" : "paperclip_finish",
     arguments: result,
   });
+  const first = await call();
+  if (String(prompt.message ?? prompt.task?.prompt ?? "").includes("completion-feedback")) {
+    const outcomes = [first];
+    if (first.result?.isError) outcomes.push(await call());
+    await writeFile(join(process.env.XDG_DATA_HOME, "fake-completion-feedback.json"), JSON.stringify(outcomes));
+    return outcomes.at(-1);
+  }
+  return first;
 }
 
 const server = createServer(async (request, response) => {
@@ -481,6 +489,32 @@ const server = createServer(async (request, response) => {
               },
             },
           });
+          return;
+        }
+        if (
+          String(parsedPrompt.message ?? "").includes(
+            "pending-request-then-turn-fails",
+          )
+        ) {
+          pendingQuestion = nativeQuestion();
+          emit({
+            type: "question.asked",
+            id: "event-question-pending-then-fail",
+            properties: pendingQuestion,
+          });
+          setTimeout(() => {
+            emit({
+              type: "session.error",
+              id: "event-session-failed-with-pending-request",
+              properties: {
+                sessionID: session.id,
+                error: {
+                  name: "ProviderError",
+                  message: "The fake provider failed with a request still pending.",
+                },
+              },
+            });
+          }, 10);
           return;
         }
         if (

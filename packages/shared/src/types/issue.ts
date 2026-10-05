@@ -444,6 +444,14 @@ export interface IssueReviewAttentionPath {
   responder: string | null;
   since: string | null;
   ref: string | null;
+  /**
+   * True when this path's only legal responder is the issue's own assignee
+   * (e.g. a pending `request_confirmation` with no addressee and
+   * `resolverPolicy: "anyone"`), so it is a self-review path and must not
+   * contribute to `state === "covered"`. Surfaced here for transparency; the
+   * `state` field is computed from the non-self paths only.
+   */
+  selfReview?: boolean;
 }
 
 export interface IssueReviewAttention {
@@ -774,6 +782,8 @@ export interface IssueChangeReceiptEntry {
 export type IssueChanges = Record<string, IssueChangeReceiptEntry>;
 
 export interface Issue {
+  /** True only while the title is the provisional slice of the initial prompt. */
+  titleNeedsGeneration?: boolean;
   conversationAgentId?: string | null;
   conversationUserId?: string | null;
   /** Server-owned Slack lifecycle projection; not writable through task updates. */
@@ -1357,8 +1367,8 @@ export type ConnectionIntentPhase = "requested" | "authorizing" | "needs_retry";
 export interface ConnectionIntentPayload {
   version: 1;
   upstreamService?: { slug: string; name: string; selectionInteractionId?: string };
-  /** Runtime authentication requests cannot be satisfied by tool credentials. */
-  purpose?: "ai";
+  /** AI authentication and inbox setup cannot be satisfied by tool credentials. */
+  purpose?: "ai" | "channel";
   serviceSlug: string;
   serviceName: string;
   serviceLogoUrl?: string | null;
@@ -1514,6 +1524,8 @@ export interface IssueThreadInteractionBase extends IssueThreadInteractionActorF
   summary?: string | null;
   status: IssueThreadInteractionStatus;
   continuationPolicy: IssueThreadInteractionContinuationPolicy;
+  /** Read-time acceptance gate; omitted when no workspace preparation is pending. */
+  acceptanceBlocker?: "workspace_sync_pending";
   /** @deprecated Read requestedResolverPolicy. Kept for API compatibility. */
   resolverPolicy: IssueThreadInteractionCanonicalResolverPolicy;
   requestedResolverPolicy: IssueThreadInteractionCanonicalResolverPolicy;

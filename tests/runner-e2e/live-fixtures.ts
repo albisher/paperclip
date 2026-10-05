@@ -1,6 +1,8 @@
+import { NATIVE_COMPLETION_BUDGET_CENTS } from "./native-completion-defaults.js";
 import path from "node:path";
 import { isManagedHiringCase } from "./chat-cases.js";
 import { FixtureRegistry } from "./fixture-registry.js";
+import { TASK_TITLE_BUDGET_CENTS } from "./task-titles.js";
 import { stageGrokSubscriptionFixture } from "./grok-subscription-fixture.js";
 import type { RunnerApi } from "./api.js";
 import type {
@@ -134,7 +136,9 @@ export async function setupLiveFixtures(input: {
       return api.post<CompanyRecord>("/api/companies", {
         name: `Runner E2E ${execution.id} ${input.executionNonce}`,
         description: "Ephemeral paid full-stack runner acceptance fixture",
-        budgetMonthlyCents: 0,
+        budgetMonthlyCents: ["native-completion", "native-instruction-consolidation"].includes(execution.suite.id) ? NATIVE_COMPLETION_BUDGET_CENTS
+          : execution.suite.id === "task-titles" ? TASK_TITLE_BUDGET_CENTS
+          : execution.suite.id === "stock-harness" ? 1_000 : 0,
       });
     },
     async teardown() {
@@ -286,6 +290,7 @@ export async function setupLiveFixtures(input: {
         secretRefs,
         executionId: input.executionNonce,
       });
+      if (execution.suite.id === "stock-harness") agent.budgetMonthlyCents = 1_000;
       if (managedHiring) {
         const account = value<ManagedAccountFixture>(resolved, "ai-connection");
         const config = agent.adapterConfig as Record<string, unknown>;

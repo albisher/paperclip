@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agentWakeupRequests,
@@ -99,7 +100,7 @@ describeEmbeddedPostgres("issue review attention", () => {
     return id;
   }
 
-  it("surfaces a pathless agent-owned review as stalled and a queued recovery as covered", async () => {
+  it("surfaces a pathless agent-owned review as stalled and a same-agent recovery wake does not cover", async () => {
     const { companyId, agentId } = await seed();
     const issueId = await insertReview({ companyId, agentId, identifier: "RVA-1" });
 
@@ -128,15 +129,28 @@ describeEmbeddedPostgres("issue review attention", () => {
       },
     });
 
+    // The recovery wake is sent to the assignee themselves, so the only
+    // legal responder is the assignee — the wake is a self-review path and
+    // must not flip state to `covered`. The issue stays stalled with the
+    // self-review marker preserved.
     row = (await svc.list(companyId, { status: "in_review" })).find((issue) => issue.id === issueId);
     expect(row?.reviewAttention).toMatchObject({
-      state: "covered",
-      paths: [expect.objectContaining({ kind: "queued_wake", responder: "Review Agent" })],
+      state: "stalled",
+      paths: [expect.objectContaining({ kind: "queued_wake", selfReview: true })],
     });
+    expect(row?.reviewAttention?.reason).toMatch(/self-review/i);
   });
 
-  it("reports every healthy review path as covered", async () => {
+  it("reports every healthy non-self review path as covered", async () => {
     const { companyId, agentId } = await seed();
+    const otherAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: otherAgentId,
+      companyId,
+      name: "Peer Reviewer",
+      role: "engineer",
+      status: "idle",
+    });
     const interactionIssueId = await insertReview({ companyId, agentId, identifier: "RVA-2" });
     const humanOnlyInteractionIssueId = await insertReview({ companyId, agentId, identifier: "RVA-2H" });
     const approvalIssueId = await insertReview({ companyId, agentId, identifier: "RVA-3" });
@@ -157,17 +171,20 @@ describeEmbeddedPostgres("issue review attention", () => {
       companyId,
       agentId,
       identifier: "RVA-6",
-      executionState: { status: "pending", currentParticipant: { type: "agent", agentId } },
+      executionState: { status: "pending", currentParticipant: { type: "agent", agentId: otherAgentId } },
     });
     const activeRunIssueId = await insertReview({ companyId, agentId, identifier: "RVA-7" });
     const recoveryIssueId = await insertReview({ companyId, agentId, identifier: "RVA-8" });
 
+    // Healthy non-self interaction has an addressee different from the assignee,
+    // so the assignee is not the sole legal responder.
     await db.insert(issueThreadInteractions).values({
       companyId,
       issueId: interactionIssueId,
       kind: "request_confirmation",
       status: "pending",
       continuationPolicy: "wake_assignee",
+      addresseeAgentId: otherAgentId,
       payload: { version: 1, prompt: "Approve?" },
     });
     await db.insert(issueThreadInteractions).values({
@@ -193,7 +210,7 @@ describeEmbeddedPostgres("issue review attention", () => {
     await db.insert(issueApprovals).values({ companyId, issueId: approvalIssueId, approvalId });
     await db.insert(heartbeatRuns).values({
       companyId,
-      agentId,
+      agentId: otherAgentId,
       status: "running",
       contextSnapshot: { issueId: activeRunIssueId },
     });
@@ -203,7 +220,7 @@ describeEmbeddedPostgres("issue review attention", () => {
       kind: "missing_disposition",
       status: "active",
       ownerType: "agent",
-      ownerAgentId: agentId,
+      ownerAgentId: otherAgentId,
       cause: "review_path_lost",
       fingerprint: "review-path",
       evidence: {},
@@ -230,10 +247,163 @@ describeEmbeddedPostgres("issue review attention", () => {
       });
     }
     expect(byId.get(interactionIssueId)?.paths).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: "interaction", responder: "Review Agent" }),
+      expect.objectContaining({ kind: "interaction", responder: "Peer Reviewer" }),
     ]));
     expect(byId.get(humanOnlyInteractionIssueId)?.paths).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "interaction", responder: "Board" }),
+    ]));
+  });
+
+  it("treats a pending anyone-policy interaction with no addressee as self-review and stalls", async () => {
+    const { companyId, agentId } = await seed();
+    const selfInteractionIssueId = await insertReview({ companyId, agentId, identifier: "RVA-SELF-1" });
+    const selfRunIssueId = await insertReview({ companyId, agentId, identifier: "RVA-SELF-2" });
+    const selfWakeIssueId = await insertReview({ companyId, agentId, identifier: "RVA-SELF-3" });
+
+    await db.insert(issueThreadInteractions).values({
+      companyId,
+      issueId: selfInteractionIssueId,
+      kind: "request_confirmation",
+      status: "pending",
+      continuationPolicy: "wake_assignee",
+      payload: { version: 1, prompt: "Self-approve?" },
+    });
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId,
+      status: "running",
+      contextSnapshot: { issueId: selfRunIssueId },
+    });
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      reason: "issue_review_path_lost",
+      status: "queued",
+      payload: { issueId: selfWakeIssueId },
+      idempotencyKey: `issue_review_path_lost:${selfWakeIssueId}:fingerprint`,
+    });
+
+    const rows = await svc.list(companyId, { status: "in_review" });
+    const byId = new Map(rows.map((row) => [row.id, row.reviewAttention]));
+    const selfInteraction = byId.get(selfInteractionIssueId);
+    const selfRun = byId.get(selfRunIssueId);
+    const selfWake = byId.get(selfWakeIssueId);
+
+    expect(selfInteraction).toMatchObject({ state: "stalled" });
+    expect(selfInteraction?.paths).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "interaction", selfReview: true }),
+    ]));
+    expect(selfInteraction?.reason).toMatch(/self-review/i);
+
+    expect(selfRun).toMatchObject({ state: "stalled" });
+    expect(selfRun?.paths).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "active_run", selfReview: true }),
+    ]));
+
+    expect(selfWake).toMatchObject({ state: "stalled" });
+    expect(selfWake?.paths).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "queued_wake", selfReview: true }),
+    ]));
+  });
+
+  it("covers a self-review interaction once a non-self review path appears (silent expiry recovery)", async () => {
+    const { companyId, agentId } = await seed();
+    const otherAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: otherAgentId,
+      companyId,
+      name: "Board Reviewer",
+      role: "engineer",
+      status: "idle",
+    });
+    const issueId = await insertReview({ companyId, agentId, identifier: "RVA-MIX-1" });
+
+    await db.insert(issueThreadInteractions).values({
+      companyId,
+      issueId,
+      kind: "request_confirmation",
+      status: "pending",
+      continuationPolicy: "wake_assignee",
+      payload: { version: 1, prompt: "Self?" },
+    });
+    let row = (await svc.list(companyId, { status: "in_review" })).find((issue) => issue.id === issueId);
+    expect(row?.reviewAttention).toMatchObject({ state: "stalled" });
+
+    // Add a human-only board card on the same issue — the non-self path now
+    // exists alongside the self-review one, so coverage is restored.
+    await db.insert(issueThreadInteractions).values({
+      companyId,
+      issueId,
+      kind: "request_confirmation",
+      status: "pending",
+      continuationPolicy: "wake_assignee",
+      requestedResolverPolicy: "human_only",
+      effectiveResolverPolicy: "human_only",
+      resolverPolicyProvenance: "explicit",
+      effectiveResolverPolicySource: "requested",
+      payload: { version: 1, prompt: "Board approval?" },
+    });
+    row = (await svc.list(companyId, { status: "in_review" })).find((issue) => issue.id === issueId);
+    expect(row?.reviewAttention).toMatchObject({ state: "covered" });
+    expect(row?.reviewAttention?.paths).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "interaction", selfReview: true }),
+      expect.objectContaining({ kind: "interaction", responder: "Board" }),
+    ]));
+    // Non-self paths omit the `selfReview` field; assert one of each kind.
+    const coveredInteractions = row?.reviewAttention?.paths.filter((path) => path.kind === "interaction") ?? [];
+    expect(coveredInteractions.some((path) => path.selfReview === true)).toBe(true);
+    expect(coveredInteractions.some((path) => path.responder === "Board" && path.selfReview === undefined)).toBe(true);
+
+    // Withdraw the board card (simulate expiry). Only the self path remains,
+    // so coverage drops and the surface shows the assignee-self trap.
+    await db.update(issueThreadInteractions)
+      .set({ status: "expired" })
+      .where(and(
+        eq(issueThreadInteractions.issueId, issueId),
+        eq(issueThreadInteractions.effectiveResolverPolicy, "human_only"),
+      ));
+    row = (await svc.list(companyId, { status: "in_review" })).find((issue) => issue.id === issueId);
+    expect(row?.reviewAttention).toMatchObject({ state: "stalled" });
+    expect(row?.reviewAttention?.paths).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "interaction", selfReview: true }),
+    ]));
+
+    // Adding an addressee to the original self-review interaction (someone other
+    // than the assignee) restores coverage without withdrawing the self path.
+    // The schema defaults `effectiveResolverPolicy` to `"anyone"` when omitted,
+    // so filter on resolver policy rather than null.
+    await db.update(issueThreadInteractions)
+      .set({ addresseeAgentId: otherAgentId })
+      .where(and(
+        eq(issueThreadInteractions.issueId, issueId),
+        eq(issueThreadInteractions.status, "pending"),
+        eq(issueThreadInteractions.effectiveResolverPolicy, "anyone"),
+      ));
+    row = (await svc.list(companyId, { status: "in_review" })).find((issue) => issue.id === issueId);
+    expect(row?.reviewAttention).toMatchObject({ state: "covered" });
+    expect(row?.reviewAttention?.paths).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "interaction", responder: "Board Reviewer" }),
+    ]));
+  });
+
+  it("treats a stale wake request from the assignee as self-review", async () => {
+    const { companyId, agentId } = await seed();
+    const issueId = await insertReview({ companyId, agentId, identifier: "RVA-WAKE" });
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      reason: "issue_review_path_lost",
+      status: "queued",
+      payload: { issueId },
+      idempotencyKey: `issue_review_path_lost:${issueId}:stale-wake`,
+    });
+
+    const row = (await svc.list(companyId, { status: "in_review" })).find((issue) => issue.id === issueId);
+    expect(row?.reviewAttention).toMatchObject({ state: "stalled" });
+    expect(row?.reviewAttention?.paths).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "queued_wake", selfReview: true }),
     ]));
   });
 
