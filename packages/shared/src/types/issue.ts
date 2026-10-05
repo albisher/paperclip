@@ -444,6 +444,14 @@ export interface IssueReviewAttentionPath {
   responder: string | null;
   since: string | null;
   ref: string | null;
+  /**
+   * True when this path's only legal responder is the issue's own assignee
+   * (e.g. a pending `request_confirmation` with no addressee and
+   * `resolverPolicy: "anyone"`), so it is a self-review path and must not
+   * contribute to `state === "covered"`. Surfaced here for transparency; the
+   * `state` field is computed from the non-self paths only.
+   */
+  selfReview?: boolean;
 }
 
 export interface IssueReviewAttention {

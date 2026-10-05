@@ -81,7 +81,7 @@ describe("issue thread interaction schemas", () => {
       "board_or_agents",
       "board_only",
     ]);
-    expect(normalizeIssueThreadInteractionResolverPolicy("board_or_agents")).toBe("anyone");
+    expect(normalizeIssueThreadInteractionResolverPolicy("board_or_agents")).toBe("not_creator");
     expect(normalizeIssueThreadInteractionResolverPolicy("board_only")).toBe("human_only");
     expect(normalizeIssueThreadInteractionResolverPolicy("not_creator")).toBe("not_creator");
     expect(legacyIssueThreadInteractionResolverPolicyAlias("anyone")).toBe("board_or_agents");

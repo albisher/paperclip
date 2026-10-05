@@ -184,6 +184,7 @@ import {
   classifyIssueReviewPaths,
   type IssueGraphLivenessInput,
   type IssueLivenessFinding,
+  type IssueReviewPathFact,
 } from "./recovery/issue-graph-liveness.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import { finalizeStatusCardsForStalledGeneration } from "./status-card-finalization.js";
@@ -4447,6 +4448,41 @@ function reviewPathLabel(
   }
 }
 
+/**
+ * A path is "self-review" when the only legal responder the path can produce is
+ * the issue's own assignee. The check covers four shapes:
+ *
+ *   1. `interaction` — a pending `request_confirmation` whose resolved
+ *      `addresseeAgentId` either is missing (audience falls back to the
+ *      assignee) or is the assignee itself, and under `resolverPolicy:
+ *      "anyone"` the assignee is the sole legal responder.
+ *   2. `execution_participant` — the issue's `executionState.currentParticipant`
+ *      is the assignee.
+ *   3. `active_run` — the running heartbeat run belongs to the assignee.
+ *   4. `queued_wake` — the queued wake is for the assignee.
+ *
+ * `human_reviewer`, `approval`, `monitor`, and `recovery` are never self-review:
+ * a human user reviewing their own ticket is the standard assignment; `monitor`,
+ * `approval`, and `recovery` are not agent-resolver paths.
+ */
+function isReviewAttentionPathSelfReview(
+  path: IssueReviewPathFact,
+  interactionResponderAgentId: string | null,
+  assigneeAgentId: string | null,
+): boolean {
+  if (!assigneeAgentId) return false;
+  switch (path.kind) {
+    case "interaction":
+      return interactionResponderAgentId === assigneeAgentId;
+    case "execution_participant":
+    case "active_run":
+    case "queued_wake":
+      return path.agentId === assigneeAgentId;
+    default:
+      return false;
+  }
+}
+
 function reviewAttentionNone(): IssueReviewAttention {
   return { state: "none", paths: [], reason: null };
 }
@@ -4785,6 +4821,20 @@ async function listIssueReviewAttentionMap(
         })
           ? candidateAgentId
           : null;
+      // Self-review: a path is "self-review" if the only legal responder is
+      // the issue's own assignee. Surfacing it as `selfReview: true` keeps
+      // the path visible for transparency while excluding it from the
+      // `covered` decision. This catches the live trap where a pending
+      // `request_confirmation` with no `addresseeAgentId` and
+      // `resolverPolicy: "anyone"` would otherwise let the assignee approve
+      // their own work, and it catches the silent-expiry case where the
+      // only remaining paths are the assignee's own `active_run` /
+      // `queued_wake` after a board card lapses.
+      const selfReview = isReviewAttentionPathSelfReview(
+        path,
+        interactionResponderAgentId,
+        issue.assigneeAgentId,
+      );
       return {
         kind: path.kind,
         label: reviewPathLabel(
@@ -4812,17 +4862,19 @@ async function listIssueReviewAttentionMap(
             ).toISOString()
           : issue.updatedAt.toISOString(),
         ref: path.ref,
+        ...(selfReview ? { selfReview: true as const } : {}),
       };
     });
 
-    if (paths.length > 0) {
+    const nonSelfPaths = paths.filter((path) => !path.selfReview);
+    if (nonSelfPaths.length > 0) {
       result.set(issue.id, {
         state: "covered",
         paths,
         reason:
-          paths.length === 1
+          nonSelfPaths.length === 1
             ? "Review has a maintained action path."
-            : `Review has ${paths.length} maintained action paths.`,
+            : `Review has ${nonSelfPaths.length} maintained action paths.`,
       });
       continue;
     }
@@ -4830,10 +4882,12 @@ async function listIssueReviewAttentionMap(
     const finding = findingsByIssueId.get(issue.id);
     result.set(issue.id, {
       state: "stalled",
-      paths: [],
+      paths,
       reason:
         finding?.reason ??
-        "Issue is in review without a maintained action path.",
+        (paths.length > 0
+          ? `Only self-review path${paths.length === 1 ? "" : "s"} remain; the issue's own assignee is the sole legal responder, which is not a review path.`
+          : "Issue is in review without a maintained action path."),
     });
   }
 

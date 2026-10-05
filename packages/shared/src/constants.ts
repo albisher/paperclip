@@ -312,7 +312,7 @@ export type IssueThreadInteractionEffectiveResolverPolicySource =
 export function normalizeIssueThreadInteractionResolverPolicy(
   policy: IssueThreadInteractionResolverPolicy,
 ): IssueThreadInteractionCanonicalResolverPolicy {
-  if (policy === "board_or_agents") return "anyone";
+  if (policy === "board_or_agents") return "not_creator";
   if (policy === "board_only") return "human_only";
   return policy;
 }

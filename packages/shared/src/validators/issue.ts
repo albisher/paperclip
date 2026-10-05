@@ -1079,7 +1079,7 @@ export const issueThreadInteractionCanonicalResolverPolicySchema = z
 export const issueThreadInteractionResolverPolicySchema = z
   .enum(ISSUE_THREAD_INTERACTION_RESOLVER_POLICIES)
   .describe(
-    "Resolver audience. Use anyone, not_creator, or human_only; board_or_agents and board_only are deprecated compatibility aliases.",
+    "Resolver audience. Use anyone, not_creator, or human_only. The legacy aliases `board_only` (normalizes to human_only) and `board_or_agents` (normalizes to not_creator — it must never widen past the legacy migration's fail-closed semantics) remain accepted for backward compatibility.",
   );
 export const issueThreadInteractionResolverPolicyProvenanceSchema = z.enum(
   ISSUE_THREAD_INTERACTION_RESOLVER_POLICY_PROVENANCES,

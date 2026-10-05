@@ -98,7 +98,7 @@ describe("issueThreadInteractionService", () => {
   it.each([
     ["ask_user_questions", undefined, {}, "anyone", "anyone", "inherited", "requested"],
     ["suggest_tasks", undefined, {}, "anyone", "anyone", "inherited", "requested"],
-    ["request_confirmation", "board_or_agents", {}, "anyone", "anyone", "explicit", "requested"],
+    ["request_confirmation", "board_or_agents", {}, "not_creator", "not_creator", "explicit", "requested"],
     ["request_confirmation", "board_only", {}, "human_only", "human_only", "explicit", "requested"],
     ["request_checkbox_confirmation", undefined, { request_checkbox_confirmation: { defaultPolicy: "not_creator" } }, "not_creator", "not_creator", "inherited", "requested"],
     ["request_item_verdicts", "anyone", { request_item_verdicts: { cap: "not_creator" } }, "anyone", "not_creator", "explicit", "company_cap"],
@@ -128,7 +128,7 @@ describe("issueThreadInteractionService", () => {
       governance: { request_confirmation: { defaultPolicy: "board_or_agents", cap: "board_or_agents" } },
       hasToolAction: true,
     })).toEqual({
-      requestedResolverPolicy: "anyone",
+      requestedResolverPolicy: "not_creator",
       effectiveResolverPolicy: "human_only",
       resolverPolicyProvenance: "explicit",
       effectiveResolverPolicySource: "governed_action",

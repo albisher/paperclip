@@ -720,8 +720,10 @@ Every issue-thread interaction kind inherits resolver policy `anyone` when the
 creator omits a policy. `anyone` includes the creator agent and creating run.
 Callers opt into independent review with `not_creator` or human resolution with
 `human_only`; a named addressee and company cap may narrow the effective audience.
-The legacy input aliases `board_or_agents` and `board_only` normalize to `anyone`
-and `human_only` for new writes.
+The legacy input alias `board_only` normalizes to `human_only` for new writes.
+The legacy input alias `board_or_agents` normalizes to `not_creator` for new
+writes so that no new card can widen past the legacy migration's fail-closed
+semantics.
 
 Resolver policy is snapshotted with explicit/inherited provenance and an effective
 source (`requested`, `company_cap`, or `governed_action`). Existing ambiguous

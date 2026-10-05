@@ -7394,7 +7394,7 @@ registry.registerPath({
   tags: ["issues"],
   summary: "Create an issue thread interaction",
   description:
-    "Resolver policy defaults to canonical `anyone` for every interaction kind. `not_creator` and `human_only` are opt-in restrictions; deprecated `board_or_agents` and `board_only` inputs are accepted as compatibility aliases.",
+    "Resolver policy defaults to canonical `anyone` for every interaction kind. `not_creator` and `human_only` are opt-in restrictions; deprecated `board_or_agents` (normalized to `not_creator` for new writes so it never widens past the legacy migration's fail-closed semantics) and `board_only` (normalized to `human_only`) are accepted as compatibility aliases.",
   request: {
     params: z.object({ id: z.string() }),
     body: jsonBody(createIssueThreadInteractionSchema),
